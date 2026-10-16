@@ -1,0 +1,84 @@
+{
+  "idea": "解释日全食",
+  "canvas": [1280, 720],
+  "voice": "zh-CN-YunxiNeural",
+  "gap": 0.35,
+  "audio_dir": "audio/narration",
+  "scenes": [
+    {
+      "id": "s01",
+      "image": "boards/s01.png",
+      "regions": [
+        {"label": "title", "box": [10, 330, 125, 670], "annotation": "什么是日全食？"},
+        {"label": "sun_moon", "box": [130, 80, 820, 720], "annotation": "当月亮恰好完全挡住太阳，白昼瞬间变成黑夜，这就是日全食。"},
+        {"label": "cloud", "box": [790, 100, 1000, 900]}
+      ]
+    },
+    {
+      "id": "s02",
+      "image": "boards/s02.png",
+      "regions": [
+        {"label": "title", "box": [25, 130, 130, 880], "annotation": "日全食发生时，太阳、月球和地球连成一条直线。"},
+        {"label": "sun", "box": [340, 60, 740, 310], "annotation": "太阳在最左边。"},
+        {"label": "moon", "box": [400, 420, 700, 580], "annotation": "月球在中间，正好挡住太阳的光。"},
+        {"label": "earth", "box": [300, 660, 760, 910], "annotation": "地球在右边，被月球的影子罩住。"},
+        {"label": "footer", "box": [880, 50, 975, 950]}
+      ]
+    },
+    {
+      "id": "s03",
+      "image": "boards/s03.png",
+      "regions": [
+        {"label": "title", "box": [[25, 320, 135, 860], [360, 30, 860, 230], [372, 390, 597, 484]], "annotation": "月球会投下两种影子。"},
+        {"label": "umbra", "box": [400, 485, 760, 760], "annotation": "深色的本影里，太阳被完全遮住，天是黑的。"},
+        {"label": "penumbra", "box": [150, 690, 350, 990], "annotation": "浅色的半影里，只遮住一部分太阳，看到的是日偏食。"}
+      ]
+    },
+    {
+      "id": "s04",
+      "image": "boards/s04.png",
+      "regions": [
+        {"label": "title", "box": [[25, 100, 130, 900], [140, 130, 700, 700]], "annotation": "月球的影子扫过地球表面，形成一条极窄的全食带。"},
+        {"label": "band", "box": [190, 490, 980, 900], "annotation": "本影落地的地方，只有几十到几百公里宽，叫做全食带。"},
+        {"label": "outside", "box": [860, 270, 970, 550], "annotation": "全食带外的人，只能看到日偏食。"}
+      ]
+    },
+    {
+      "id": "s05",
+      "image": "boards/s05.png",
+      "regions": [
+        {"label": "title", "box": [25, 230, 130, 770], "annotation": "为什么不是每个月都有日食？"},
+        {"label": "orbit", "box": [250, 80, 830, 910], "annotation": "因为月球绕地球的轨道，倾斜了大约五度。"},
+        {"label": "footer", "box": [860, 40, 970, 960], "annotation": "多数时候，影子从地球上方或下方掠过。"}
+      ]
+    },
+    {
+      "id": "s06",
+      "image": "boards/s06.png",
+      "regions": [
+        {"label": "title", "box": [25, 270, 130, 730], "annotation": "一次日全食，有五个阶段。"},
+        {"label": "first", "box": [300, 40, 740, 430], "annotation": "初亏，月亮刚咬太阳一口；食既，太阳只剩最后一线光。"},
+        {"label": "totality", "box": [300, 460, 740, 790], "annotation": "食甚，太阳被完全遮住，白昼如夜。"},
+        {"label": "last", "box": [300, 650, 740, 990], "annotation": "生光，阳光重新露头；复圆，太阳恢复完整。"},
+        {"label": "footer", "box": [840, 50, 940, 950]}
+      ]
+    },
+    {
+      "id": "s07",
+      "image": "boards/s07.png",
+      "regions": [
+        {"label": "title", "box": [5, 200, 90, 800], "annotation": "全食的瞬间，还能看到日冕。"},
+        {"label": "corona", "box": [70, 280, 580, 720], "annotation": "平时被阳光淹没的太阳外层大气，此刻露出来，像一圈珍珠色的光晕，这就是日冕。"},
+        {"label": "roof", "box": [570, 30, 940, 540]}
+      ]
+    },
+    {
+      "id": "s08",
+      "image": "boards/s08.png",
+      "regions": [
+        {"label": "title", "box": [[0, 360, 95, 640], [330, 690, 990, 990]], "annotation": "最后是安全提醒。"},
+        {"label": "warn", "box": [820, 200, 950, 800], "annotation": "看日食必须使用专业滤光镜，绝对不能用肉眼直视太阳，否则会造成永久性的视力损伤。"}
+      ]
+    }
+  ]
+}

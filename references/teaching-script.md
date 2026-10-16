@@ -1,0 +1,77 @@
+# 教学讲稿流程(文章/教程 → 白板讲解视频)
+
+> 输入是一篇文章/教程/文档,要产出"把它讲透"的视频时,**优先走本流程**。
+> 来源:UART 教程视频项目复盘(对照原文逐项覆盖、问题驱动、先稿后片)。
+
+## 核心原则(踩坑总结,违反必返工)
+
+1. **先稿后片**:讲稿是第一交付物。逐拍表格(拍号|画面|旁白逐字稿)写进 `讲稿.md`,自检通过才动笔画图。禁止边画边想。
+2. **问题驱动,拒绝照书念**:开场用真实实验/悬念提问;每个概念必须由一个具体问题引出(白板上画 Q 气泡,先问再答);结尾回扣开头的问题,让观众自己能答上来。
+3. **举例 ≠ 比喻**:受众高中生及以上时,例子要用真材料——数值计算、真实编码/帧实例、失配实验、原理与局限。比喻只作一句话辅助,不许当骨架。
+4. **原文覆盖度优先**:逐项盘点原文知识点列成清单,制作前逐项打勾;不许因为"不好画"就漏讲。
+5. **原文图片是知识的一部分**:全部下载并逐张 Read 理解。照片/截图/接线图直接合成上屏(当作贴在白板上的原文图表);数据帧、连接图等示意图按原文结构忠实重绘;blob 等无法下载的图按内容重绘。
+6. **每讲找 1~2 个启发点**:解释"为什么这样设计"而不是"是什么"。例:UART 起始位 = 每字节开头重新对表,时钟误差不累积,所以敢省掉时钟线。这是"让人有启发"的关键。
+
+## 七步流程
+
+| 步 | 做什么 | 要点 |
+|---|---|---|
+| 1 | 全文抓取 | web_reader 抓正文 + 图片清单;下载全部可访问图片,逐张 Read 理解;记录 blob 图并按内容重绘 |
+| 2 | 知识点盘点 | 列覆盖度清单:定义/原理/参数/帧或协议结构/代码逐行/硬件与接线/坑与限制/图片 |
+| 3 | 写 `讲稿.md` | 逐拍表格(拍号|画面|旁白逐字稿);按问题链组织;例子里的数值自己算一遍再写 |
+| 4 | 讲稿自检 | 覆盖度逐项打勾;准确性抽查(编码/数值/倍数);问题链完整;例子数 ≥ 知识点数的 1/3;单拍旁白 ≤50 字(>40 字考虑拆两拍) |
+| 5 | 绘图脚本 | 固定模式:Q 气泡(qbubble)、代码卡(代码+大白话注释同行)、实例条(格子逐位)、真实图 paste_fig;bx() 一律像素 (x0,y0,x1,y1) |
+| 6 | 音频 | 语速 +15%~+25%:wrapper monkey-patch `build_narration.tts`(不改 skill 本体),并裁掉分片首尾静音(见下);gap 0.2。**技术/编程内容硬性规则:TTS 前把 `_` 替换成空格(下划线不读,禁止读"下划线"),示例见 esp-claw-course/build_narration_course.py** |
+| 7 | 质检渲染 | 渲染前 `check_assignment.py plan.json` 归属清零;渲染后按 cue 抽帧:Q 先出现、答案后画、代码逐行随旁白 |
+
+## 语速与静音裁剪 wrapper(build_with_rate.py)
+
+不改 skill 本体,monkey-patch 模块级 `tts`;裁静音用 silenceremove+areverse 双程,保留 0.08s 垫:
+
+```python
+import asyncio, json, subprocess, sys
+from pathlib import Path
+SKILL = Path(__file__).resolve().parent  # 按项目位置调整
+sys.path.insert(0, SKILL)
+import build_narration as bn
+
+_orig = bn.tts
+TRIM = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.08,"
+        "areverse,"
+        "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.08,"
+        "areverse")
+
+async def tts_fast(text, out, voice, rate="+0%"):
+    await _orig(text, out, voice, rate="+22%")
+    tmp = out.with_suffix(".trim.mp3")
+    subprocess.run(["ffmpeg", "-y", "-i", str(out), "-af", TRIM,
+                    "-c:a", "libmp3lame", "-q:a", "2", str(tmp)],
+                   check=True, capture_output=True, encoding="utf-8", errors="replace")
+    tmp.replace(out)
+
+bn.tts = tts_fast
+spec = json.loads((Path(__file__).resolve().parent / "plan.build.json").read_text(encoding="utf-8"))
+asyncio.run(bn.build(spec, Path(__file__).resolve().parent, dry=False))
+```
+
+经验值:Yunxi/Xiaoxiao 在 +22% 时仍清晰;+15% 偏稳;旁白中文 ~4.5~5 字/秒(含裁剪后)。TTS 分片自带头尾静音约 0.3~0.6s,不裁剪会白白拉长 20% 时长。**改语速后必须删除旧分片重生成**,并 `--force` 重渲。
+
+## 讲稿自检清单(附在 讲稿.md 末尾)
+
+```
+1. 覆盖度:原文知识点逐项打勾(定义/原理/参数/结构/代码/硬件/坑/图片)
+2. 准确性:例子里每个数值、编码、倍数自己重算一遍
+3. 问题链:开场有问题;每个新概念前有问题;结尾回扣开头
+4. 例子密度:真例子(计算/实例/实验)数 ≥ 知识点数的 1/3;比喻只作辅助
+5. 启发点:≥1 个"为什么这样设计"
+6. 节奏:单拍旁白 ≤50 字;预计总时长 = 拍数 × 4~5s(+15%~+25% 语速)
+```
+
+## 常见错误(每条都真实踩过)
+
+- **照书念**:名词+定义罗列,无问题无例子 → 推倒重写,先补问题链
+- **比喻幼稚化**:给高中生讲"嘴对耳朵"当主菜 → 换成计算/实例/原理
+- **漏原文知识**:只挑好画的画 → 覆盖度清单逐项打勾
+- **文字画在格子里被前一拍抢走**:值文字落在结构格所属 box 内 → 归属检查会抓到;把值文字单独成拍或调整 box
+- **线缆端点距元素 <8px**:粘连成巨型组件 → 端点缩回留白缝
+- **真实图与手绘元素重叠**:paste 的图要有独立白区;贴图后如需叠加文字,先目检
