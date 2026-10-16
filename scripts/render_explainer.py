@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import re
 import subprocess
 import sys
 import time
@@ -66,14 +68,32 @@ def run(cmd: list[str]) -> subprocess.CompletedProcess:
 
 
 def probe_duration(path: Path) -> float:
-    out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-               "-of", "csv=p=0", str(path)])
+    """读媒体时长。优先 ffprobe；本机没装 ffprobe 时退回 ffmpeg 解析。"""
     try:
-        duration = float(out.stdout.strip())
-    except ValueError as exc:
-        raise ValueError(f"无法读取音频时长: {path}") from exc
+        out = run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                   "-of", "csv=p=0", str(path)])
+        return _check_duration(float(out.stdout.strip()), path)
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+    # 兜底：用 ffmpeg 读 stderr 里的 Duration
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    import theme as _t
+    _t.setup_ffmpeg_env()
+    ff = _t.ffmpeg_path()
+    if not ff:
+        raise FileNotFoundError("需要 ffprobe 或 ffmpeg 才能读时长，两者都没找到")
+    r = subprocess.run([ff, "-i", str(path)], capture_output=True, encoding="utf-8",
+                       errors="replace")
+    m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", r.stderr)
+    if not m:
+        raise ValueError(f"无法读取时长: {path}")
+    h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+    return _check_duration(h * 3600 + mi * 60 + s, path)
+
+
+def _check_duration(duration: float, path: Path) -> float:
     if not math.isfinite(duration) or duration <= 0:
-        raise ValueError(f"音频时长非法: {path} -> {duration}")
+        raise ValueError(f"时长非法: {path} -> {duration}")
     return duration
 
 
@@ -259,14 +279,20 @@ def render_scene(scene: dict, root: Path, out_dir: Path, quality: str,
 
     if audio_path is None:
         video_only.replace(scene_out)
-        return scene_out, total
-
-    run(["ffmpeg", "-y", "-i", str(video_only), "-i", str(audio_path),
-         "-c:v", "copy", "-c:a", "aac", "-shortest", str(scene_out)])
+    else:
+        run(["ffmpeg", "-y", "-i", str(video_only), "-i", str(audio_path),
+             "-c:v", "copy", "-c:a", "aac", "-shortest", str(scene_out)])
     try:
         video_only.unlink()
     except OSError:
         pass
+
+    # 换主题时，成片后再整体染色（引擎只认纯白，底色进不了帧缓冲）
+    if globals().get("_THEME_NAME") and globals()["_THEME_NAME"] != "whiteboard":
+        from themed_render import tint_video
+        tint_video(str(scene_out), globals()["_THEME_NAME"])
+        log(f"  [{sid}] 已按主题 {_THEME_NAME} 染色底色")
+
     total = probe_duration(scene_out)
     return scene_out, total
 
@@ -297,12 +323,27 @@ def main() -> int:
     ap.add_argument("--only", help="只渲这一拍（如 s01），不 concat")
     ap.add_argument("--force", action="store_true", help="忽略已存在的分拍 mp4，强制重渲")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不渲染")
+    ap.add_argument("--theme", help="配色主题（whiteboard/warm/cool/mint/sakura）；"
+                                   "非默认主题会走 lib/themed_render.py 成片后整体染色")
     args = ap.parse_args()
 
     plan_path = Path(args.plan).resolve()
     root = plan_path.parent
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     scenes = plan["scenes"]
+
+    # 主题：默认主题走原路径（零成本）；换主题则成片后整体染色
+    theme_name = args.theme or os.environ.get("WHITEBOARD_THEME") or "whiteboard"
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+    import theme as _theme_mod
+    _theme_mod.setup_ffmpeg_env()
+    # 老版 ffmpeg 缺 tpad 滤镜 → 禁用引擎的延帧路径（整段当绘制期）
+    _theme_mod.patch_no_tpad()
+    themed = theme_name != _theme_mod.DEFAULT_THEME
+    globals()["_THEME_NAME"] = theme_name
+    if args.theme:
+        log(f"配色主题：{theme_name}（{_theme_mod.get(theme_name)['paper']}）"
+            + ("｜成片后整体染色" if themed else "｜默认路径"))
 
     if args.only:
         scenes = [s for s in scenes if s["id"] == args.only]

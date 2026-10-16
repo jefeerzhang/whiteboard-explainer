@@ -31,26 +31,111 @@ from __future__ import annotations
 
 import json
 import math
+import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+import theme as _theme  # noqa: E402
+
 W, H = 720, 1280
 
-INK = "#171714"
-BLUE = "#3B6FE5"
-GREEN = "#2E7D32"
-ORANGE = "#D97A26"
-RED = "#D64545"
-GREY = "#8A8A8A"
-PURPLE = "#9B6BBF"
-WHITE = "#FFFFFF"
-YELLOW = "#E8B93C"
-BLUE_LT = "#9EC5F0"
-GREEN_LT = "#A8D5A0"
-YELLOW_LT = "#FFDF8A"
-PINK = "#F0A8C0"
-ORANGE_LT = "#F5C77A"
+# ── 主题 ─────────────────────────────────────────────────────────
+# 默认 "whiteboard" 与改造前的硬编码色板一致，老项目零变化。
+# 换主题：BW.set_theme("warm")，或环境变量 WHITEBOARD_THEME=warm
+_active: dict = _theme.THEMES[_theme.DEFAULT_THEME]
+
+
+def set_theme(name: str | None = None) -> dict:
+    """切换配色主题。底色必须是灰度 240 的纯色，详见 lib/theme.py。
+
+    实现要点：Python 函数对象的 __defaults__ 是运行时可变的。这里把每个
+    绘图函数签名里的颜色默认值就地改写成新主题的色值，因此
+    「模块导入时的常量」变成「每次 set_theme 后的当前主题」，
+    而所有绘图函数的函数体一行都不用动，老代码调用方式完全不变。
+    """
+    global _active, WHITE, INK, BLUE, GREEN, ORANGE, RED, GREY, PURPLE, YELLOW
+    global BLUE_LT, GREEN_LT, YELLOW_LT, PINK, ORANGE_LT
+    import os
+    _active = _theme.get(name or os.environ.get("WHITEBOARD_THEME"))
+    t = _active
+    # 同步模块级常量（供直接 import BW; BW.INK 的老代码）
+    for k in ("ink", "blue", "green", "orange", "red", "muted", "purple",
+              "yellow", "blueF", "greenF", "yellowF", "purpleF", "orangeF"):
+        globals()[_UPPER[k]] = t[k]
+    INK, BLUE, GREEN, ORANGE, RED = t["ink"], t["blue"], t["green"], t["orange"], t["red"]
+    GREY, PURPLE, YELLOW = t["muted"], t["purple"], t["yellow"]
+    BLUE_LT, GREEN_LT, YELLOW_LT = t["blueF"], t["greenF"], t["yellowF"]
+    PINK, ORANGE_LT = t["purpleF"], t["orangeF"]
+    WHITE = t["paper"]
+    # 重写所有绘图函数的颜色默认值
+    _apply_defaults()
+    return t
+
+
+_UPPER = {"ink": "INK", "blue": "BLUE", "green": "GREEN", "orange": "ORANGE",
+          "red": "RED", "muted": "GREY", "purple": "PURPLE",
+          "yellow": "YELLOW", "blueF": "BLUE_LT", "greenF": "GREEN_LT",
+          "yellowF": "YELLOW_LT", "purpleF": "PINK", "orangeF": "ORANGE_LT",
+          "paper": "WHITE"}
+# 语义名 → 调色板键。签名里写 out=INK 的，键就是 ink。
+_SEM = {"INK": "ink", "BLUE": "blue", "GREEN": "green", "ORANGE": "orange",
+        "RED": "red", "GREY": "muted", "PURPLE": "purple", "YELLOW": "yellow",
+        "WHITE": "paper", "BLUE_LT": "blueF", "GREEN_LT": "greenF",
+        "YELLOW_LT": "yellowF", "PINK": "purpleF", "ORANGE_LT": "orangeF"}
+
+# 记录原始默认值：(函数名, 位置, 语义名)，用于主题切换时重写
+_DEF_SLOTS: list[tuple] = []
+
+
+def _apply_defaults() -> None:
+    """把所有绘图函数签名里的颜色默认值换成当前主题色值。"""
+    for fn_name, idx, sem in _DEF_SLOTS:
+        fn = globals().get(fn_name)
+        if fn is None:
+            continue
+        d = list(fn.__defaults__ or ())
+        if idx < len(d):
+            d[idx] = _active[_SEM[sem]]
+            fn.__defaults__ = tuple(d)
+
+
+def C(name: str) -> str:
+    """按调色板键名取色：INK / RED / BLUE_LT / PAPER / MUTED …
+
+    键名与 frametell 引擎一致（ink/soft/muted/faint/paper + 色名F），
+    便于日后迁移到它的渲染后端时组件零改动。
+    """
+    t = _active
+    if name in ("PAPER", "WHITE"):
+        return t["paper"]
+    if name in t:
+        return t[name]
+    alias = {"GREY": "muted", "GRAY": "muted", "BLUE_LT": "blueF",
+             "GREEN_LT": "greenF", "YELLOW_LT": "yellowF",
+             "ORANGE_LT": "orangeF", "PINK": "purpleF"}
+    key = alias.get(name, name)
+    if key in t:
+        return t[key]
+    raise KeyError(f"主题里没有颜色 {name!r}")
+
+
+# 常用语义色的模块级别名（保持旧代码 import BW; BW.INK 的用法继续可用）
+INK = _theme.THEMES[_theme.DEFAULT_THEME]["ink"]
+BLUE = _theme.THEMES[_theme.DEFAULT_THEME]["blue"]
+GREEN = _theme.THEMES[_theme.DEFAULT_THEME]["green"]
+ORANGE = _theme.THEMES[_theme.DEFAULT_THEME]["orange"]
+RED = _theme.THEMES[_theme.DEFAULT_THEME]["red"]
+GREY = _theme.THEMES[_theme.DEFAULT_THEME]["muted"]
+PURPLE = _theme.THEMES[_theme.DEFAULT_THEME]["purple"]
+WHITE = _theme.THEMES[_theme.DEFAULT_THEME]["paper"]
+YELLOW = _theme.THEMES[_theme.DEFAULT_THEME]["yellow"]
+BLUE_LT = _theme.THEMES[_theme.DEFAULT_THEME]["blueF"]
+GREEN_LT = _theme.THEMES[_theme.DEFAULT_THEME]["greenF"]
+YELLOW_LT = _theme.THEMES[_theme.DEFAULT_THEME]["yellowF"]
+PINK = _theme.THEMES[_theme.DEFAULT_THEME]["purpleF"]
+ORANGE_LT = _theme.THEMES[_theme.DEFAULT_THEME]["orangeF"]
 LW = 6
 
 SCENES: list[dict] = []
@@ -166,10 +251,31 @@ def crown(d, cx, cy, w, h, out=ORANGE, lw=LW):
 
 
 def qmark(d, cx, cy, r, out=BLUE, lw=16):
-    d.arc([cx - r, cy - r * 1.05, cx + r, cy + r * 0.55], 205, 335, fill=out, width=lw)
-    d.line([cx + r * 0.52, cy + r * 0.24, cx + r * 0.06, cy + r * 0.92], fill=out, width=lw)
-    d.ellipse([cx + r * 0.06 - lw * 0.62, cy + r * 1.02,
-               cx + r * 0.06 + lw * 0.62, cy + r * 1.02 + lw * 1.24], fill=out)
+    """问号。三笔构成：上钩 + 下竖钩 + 圆点。
+
+    旧实现用 arc(205~335) 画钩，小尺寸下弧几乎看不见、点也只有几像素。
+    改成用 bezier 曲线画钩、点用min(lw, r*0.34) 控制，任何 r 都清晰。
+    """
+    import math as _m
+    w = max(int(lw), int(r * 0.20))          # 线宽随尺寸自适应
+    # 上钩：从左上起笔，绕到右侧再回勾向左下
+    hook = [
+        (cx - r * 0.62, cy - r * 0.52),
+        (cx - r * 0.60, cy - r * 1.02),
+        (cx + r * 0.02, cy - r * 1.10),
+        (cx + r * 0.62, cy - r * 0.98),
+        (cx + r * 0.64, cy - r * 0.28),
+        (cx + r * 0.30, cy + r * 0.22),
+        (cx + r * 0.02, cy + r * 0.46),
+    ]
+    d.line(hook, fill=out, width=w, joint="curve")
+    # 下竖钩
+    d.line([(cx + r * 0.02, cy + r * 0.46), (cx + r * 0.02, cy + r * 0.74)],
+           fill=out, width=w)
+    # 圆点
+    pr = max(w * 0.62, r * 0.17)
+    d.ellipse([cx + r * 0.02 - pr, cy + r * 1.00 - pr,
+               cx + r * 0.02 + pr, cy + r * 1.00 + pr], fill=out)
 
 
 def arrow_r(d, p1, p2, out=INK, lw=6):
@@ -493,3 +599,92 @@ def burst(d, cx, cy, r, out=ORANGE, lw=5, n=10):
         r1 = r if i % 2 == 0 else r * 0.55
         d.line([cx + r1 * 0.5 * math.cos(a), cy + r1 * 0.5 * math.sin(a),
                 cx + r1 * math.cos(a), cy + r1 * math.sin(a)], fill=out, width=lw)
+
+
+# ── 主题默认值登记（模块导入时扫描一次）────────────────────────────
+# 扫描所有模块级函数的 __defaults__，把等于颜色常量的默认值登记下来，
+# 于是 set_theme() 能把它们整体换成新主题的色值。
+def _register_theme_defaults() -> None:
+    import inspect
+    # 建立「当前色值字符串 → 语义名」的反查表，供逐个默认值比对
+    cur = {}
+    for sem, key in _SEM.items():
+        cur[_active.get(key, "")] = sem
+    for name, obj in list(globals().items()):
+        if not (inspect.isfunction(obj) and obj.__module__ == __name__):
+            continue
+        try:
+            inspect.signature(obj)
+        except (TypeError, ValueError):
+            continue
+        defaults = obj.__defaults__ or ()
+        for i, val in enumerate(defaults):
+            if isinstance(val, str) and val in cur:
+                _DEF_SLOTS.append((name, i, cur[val]))
+
+
+_register_theme_defaults()
+
+# 环境变量优先（WHITEBOARD_THEME=warm python make_boards.py 即可整批换肤）
+import os as _os
+if _os.environ.get("WHITEBOARD_THEME"):
+    set_theme(_os.environ["WHITEBOARD_THEME"])
+
+
+# ---------------------------------------------------------------- 正多边形（圆周率逼近）
+def regular_polygon(d, cx, cy, r, n, rotate=-90, out=None, fill=None,
+                    w=5, color_idx=None):
+    """画内接于半径 r 的正 n 边形。rotate=-90 时顶点在正上方。
+
+    n 边形的每条边对应圆心角 360/n，边长 = 2r·sin(π/n)，
+    周长 = n · 2r·sin(π/n)，n→∞ 时趋近 2πr。
+    """
+    import math as _m
+    out = out or C("ink")
+    pts = []
+    for i in range(n):
+        a = _m.radians(rotate + i * 360.0 / n)
+        pts.append((cx + r * _m.cos(a), cy + r * _m.sin(a)))
+    d.polygon(pts, fill=fill, outline=out, width=w)
+    return pts
+
+
+def polygon_perimeter(r: float, n: int) -> float:
+    """半径 r 的内接正 n 边形周长。"""
+    import math as _m
+    return n * 2 * r * _m.sin(_m.pi / n)
+
+
+def circle_outline(d, cx, cy, r, out=None, w=4, dashed=False):
+    """虚线圆：表示"理想的圆"，与逼近的多边形区分开。"""
+    import math as _m
+    out = out or C("muted")
+    if not dashed:
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=out, width=w)
+        return
+    segs = 72
+    for i in range(0, segs, 2):
+        a1 = _m.radians(i * 360 / segs)
+        a2 = _m.radians((i + 1) * 360 / segs)
+        d.line([cx + r * _m.cos(a1), cy + r * _m.sin(a1),
+                cx + r * _m.cos(a2), cy + r * _m.sin(a2)], fill=out, width=w)
+
+
+def arch(d, cx, ytop, w, h, out=None, lw=6):
+    """牌坊式建筑轮廓（画府/营造感）。"""
+    out = out or C("ink")
+    d.rectangle([cx - w / 2, ytop + h * 0.3, cx + w / 2, ytop + h], outline=out, width=lw)
+    d.polygon([(cx - w / 2 - 14, ytop + h * 0.3), (cx, ytop),
+               (cx + w / 2 + 14, ytop + h * 0.3)], outline=out, width=lw)
+    d.rectangle([cx - w / 2 - 14, ytop + h * 0.26, cx + w / 2 + 14, ytop + h * 0.34],
+                outline=out, width=lw)
+
+
+def scroll(d, cx, cy, w, h, out=None, lw=5):
+    """竹简/卷轴：呼应古代算术。"""
+    out = out or C("ink")
+    d.rectangle([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2],
+                fill=C("yellowF"), outline=out, width=lw)
+    for i in range(4):
+        xx = cx - w / 2 + w * (i + 1) / 5
+        d.line([xx, cy - h / 2 + 10, xx, cy + h / 2 - 10], fill=out, width=2)

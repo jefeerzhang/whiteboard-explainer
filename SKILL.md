@@ -14,7 +14,12 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 
 **和另外两个手绘 skill 的区别**：`story-handdrawn-remotion` 是静帧擦除（假手绘）；`story-handdrawn-video` 是 Agnes 文生视频（真动但不可控）；本 skill 是**像素级笔画绘制**——帧帧确定、本地零成本、可秒级重渲，且支持"一图逐元素生长"的单画布模式（前两者做不到）。
 
-**工具链**：whiteboard-animator 引擎（官方 PyPI 包 `==0.1.1`，首次 setup 自动安装，自带 CRAFT 文字检测模型约 83MB）+ Agnes Image 2.1（白板风生图，免费）+ PIL（确定性中文文字层）+ edge-tts（免费旁白）+ ffmpeg。
+**工具链**：whiteboard-animator 引擎（官方 PyPI 包 `==0.1.1`，首次 setup 自动安装，自带 CRAFT 文字检测模型 craft.onnx 约 83MB）+ Agnes Image 2.1（白板风生图，免费）+ PIL（确定性中文文字层）+ **旁白 TTS（edge-tts 被 403 封锁时改用 [apiz](https://apiz.ai/) CLI）** + ffmpeg。
+
+> ⚠️ **edge-tts 很可能不可用**：它按 IP/地区被微软封锁，报
+> `WSServerHandshakeError 403` 时重试无意义，**必须换 apiz**。
+> 动手做第一集前先跑一次探测：`python scripts/gen_tts.py "测试" --out /tmp/p.mp3`。
+> 403 → 走 `references/apiz-tts-fallback.md`（含安装、登录、可用音色、完整 `build_voice.py`）。
 
 **安装（下载后只要 1 步）**：
 
@@ -101,6 +106,12 @@ python ../ffmpeg-skill/scripts/_contract.py doctor --json
 
 | 症状 | 原因 | 处置 |
 |---|---|---|
+| **`WSServerHandshakeError 403`（TTS）** | **edge-tts 被微软按 IP/地区封锁** | **重试无用，换 [apiz](https://apiz.ai/)**：`curl -fsSL https://apiz.ai/cli \| sh` → `apiz auth login --api-key sk-...` → 用 `apiz speak --output-file`（**别用 `apiz generate`**）。完整脚本见 `references/apiz-tts-fallback.md` |
+| apiz 所有模型都 429 余额不足 | 余额 < 10 元触发全局闸门 | `apiz account balance` 充值，立即恢复 |
+| 换配色后成片仍是纯白 | 引擎 `frame_buf = np.full(..., 255)` 硬编码底色 | 用 `--theme`（`lib/themed_render.py` 成片后染色）；底色必须灰度恰好 240 |
+| `No such filter: 'tpad'` | ffmpeg 版本老，缺该滤镜 | `theme.patch_no_tpad()`（`render_explainer.py` 已自动调用） |
+| 找不到 `ffprobe` | 本机没装 | 自动退回 ffmpeg 解析时长；或改 `lib/theme.py` 的 `FFMPEG_CANDIDATES` |
+| `check_assignment` 报未归属且怎么改 box 都不变 | `BW.save()` 收的是**像素** `(x0,y0,x1,y1)` 不是归一化 | 按像素写；**改完 board 必须重跑 `build_narration`**（check 读 plan.json） |
 | compose 报 region 引用缺失 | TILE_VISUALS 漏键 / texts 的 key 拼错 | 补键；勿用子串判断"是否已加" |
 | 生成块里有乱码假中文/深色底 | 生图提示词约束不够 | 白底占比 <60% 自动重出；提示词强调纯白底+无任何文字 |
 | 长音频转写 OOM (mkl_malloc) | 整段推理内存峰值 | 分块转写（transcribe_align 已内置） |
@@ -162,6 +173,79 @@ python scripts/make_text_layer.py boards/s01.png --out boards/s01.png \
 **底图硬规则（ink-on-white）**：
 - 白底（近白像素引擎会 snap 成白）；灰度 <240 才算墨——浅黄/浅灰要够深（#FFF 系会消失）
 - 长边 >1280 引擎自动缩小；项目级画布一次选定（横屏 1280×720 / 竖屏 720×1280）
+
+## 配色主题（换底色/换色系）
+
+引擎把底色**三处硬编码为纯白 255**，实测确认：
+
+```
+video_encoding.py:91     white = np.ones((h,w,3), np.uint8) * 255   # 空白帧
+video_encoding.py:132    frame_buf = np.full((h,w,3), 255, ...)        # 主帧缓冲
+video_encoding.py:178    255.0 + (color - 255.0) * a                  # 淡入混合底色
+```
+
+所以**底色只存在于 PNG**：PNG 阶段能通过连通域检查，但像素值进不了视频。
+实测把底色从 gray 240 一路加深到 213，成片首帧仍是 `(255,255,255)` 纯白。
+
+解法：**成片后整体染色**（`lib/themed_render.py`）——引擎照常渲染纯白底线稿，
+再把「接近纯白」的像素换成主题底色，浅色填充（gray 224~237）原样保留。
+不改 site-packages，引擎升级不受影响。
+
+```bash
+python scripts/render_explainer.py plan.json --out out/x.mp4 --theme warm
+```
+
+或整批换肤：`WHITEBOARD_THEME=cool python ...`
+
+绘图阶段也能切（影响 PNG 里的线条色/填充色/文字色）：
+
+```python
+import board_widgets as BW
+BW.set_theme("warm")
+```
+
+| 主题 | 底色 | 适合 |
+|---|---|---|
+| `whiteboard` | `#F0F0F0` 近白 | 默认，原有观感，零回归 |
+| `warm` | `#FBEDE3` 暖米 | 知识科普、书摘 |
+| `cool` | `#EAF1FB` 冷蓝 | 技术/代码讲解 |
+| `mint` | `#E7F4F3` 薄荷 | 轻量科普、生活类 |
+| `sakura` | `#FBEBED` 樱粉 | 人文、情感、叙事 |
+
+绘图代码**一行不用改**：`BW.set_theme()` 就地改写所有绘图函数的颜色默认值
+（函数签名 + 全局常量），52 个函数、40+ 组件的线条色、填充色、文字色全部跟随。
+
+### PNG 阶段的底色约束（仅影响连通域识别，不影响成片底色）
+
+底色必须**灰度恰好 240 的纯色**，否则图形识别会出错：
+
+| 底色灰度 | 引擎行为 |
+|---|---|
+| 235–239 | ✗ 底色与图形焊成全屏连通域 |
+| **240** | ✓ 唯一可用 |
+| 241+ | 被刷成纯白 |
+
+**不能用渐变**（跨过 240 即失效）、**不能加噪点**（±3 噪点产生 23606 个连通域）。
+
+改主题表后先体检：
+
+```bash
+python lib/tools/check_theme.py          # 底色灰度/误判/文字碎裂/填充色
+python lib/tools/pick_paper.py           # 求解任意底色：pick_paper.py "#F0EADC"
+python lib/tools/demo_themes.py          # 五主题静态对比图
+```
+
+体检会检查一个容易踩的坑：**辅助文字色（`muted`）若与底色同色相且偏浅，小字会被二值化切碎**（实测 `#8496A8` 配 `#EAF1FB` 让 30px 中文碎成 98 块）。所以 `muted` 一律灰度 ≲125 且色相与底色拉开。
+
+### ffmpeg 定位
+
+本机 PATH / 注册表登记的 ffmpeg 目录**已失效**，实际可用的是 ShadowBot 自带那份
+（2016 版，有 libx264，**缺 `tpad` 滤镜**）。`lib/theme.py` 的 `ffmpeg_path()`
+按 libx264 可用性排好优先级，`setup_ffmpeg_env()` 负责注入 PATH。
+缺 `tpad` 的影响：引擎收尾延帧会失败，**渲染时让 `draw_end == total` 即可规避**
+（`render_explainer.py` 已按此处理）。
+
+`probe_duration` 也加了兜底：本机没有 `ffprobe`，会自动退回用 ffmpeg 解析时长。
 
 ### 3. 生成音轨 + 精确 cue
 
@@ -250,8 +334,9 @@ python scripts/self_test.py
 |---|---|---|
 | `whiteboard-animator` | pip 包（PyPI，自带 83MB CRAFT 模型） | 必须，setup 自动 `pip install ==0.1.1` |
 | `onnxruntime` / `numpy` / `Pillow` / `opencv` / `scipy` / `scikit-image` | pip 包（引擎传递依赖） | 必须，pip 自动装 |
-| `edge-tts` | pip 包 | 必须（免费 TTS，无需账号） |
-| `ffmpeg` / `ffprobe` | 系统二进制 | 必须，PATH 里要有 |
+| `edge-tts` | pip 包 | **可选**——免费 TTS，但常被 403 封锁 |
+| `apiz` CLI（[apiz.ai](https://apiz.ai/)） | 系统二进制 | **edge-tts 不可用时替代**，需免费注册拿 key（`curl -fsSL https://apiz.ai/cli | sh`），按量计费 |
+| `ffmpeg` | 系统二进制 | 必须，需支持 **libx264**；`ffprobe` 可选（缺了自动退回 ffmpeg 解析时长） |
 | `AGNES_API_KEY` | Agnes 生图 API key（可选） | 仅当 `gen_board_images.py` 需要生图时 |
 
 无 `AGNES_API_KEY` 也能出片（PIL 自带的 `make_text_layer.py` + `templates/chart-recipes/*.py` 够画大部分图）；需要 AI 生图时才用它。
