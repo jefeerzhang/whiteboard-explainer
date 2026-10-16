@@ -16,13 +16,15 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 
 **禁止**在未获用户明确同意时连续完成「写稿→画板→配音→渲染」。  
 完整协议、选项表、确认话术模板见 **`references/user-gates.md`**。开做前必须读。
+脚本审批入口：`scripts/user_gates.py`。每集独立保存 `.user-gates.json`；用户交互确认，文件变更使确认失效。自定义绘图/TTS 命令必须用其 `run` 子命令包裹，详见上述协议。
 
 | 闸 | 确认什么 | 未通过时禁止 |
 |---|---|---|
 | G1 | **讲稿风格**（推荐一问一答；另有独白 / 苏格拉底追问） | 写完整 `讲稿.md`（可先列覆盖度清单） |
 | G2 | **讲稿内容**（`讲稿.md` + 自检 + 覆盖度；重要篇章附分章摘要） | `make_boards` / 出图 |
-| G3 | **TTS 语音**（后端探测后贴音色与语速；用户选定再写入 plan） | 任何 TTS / `build_narration*` |
+| G3 | **TTS 语音**（单独获准后探测或试听；用户选定音色与语速再批量配音） | 未获准的 TTS / 批量 `build_narration*` |
 | G4 | **冒烟一拍**抽帧 | 全量 `render_explainer` |
+| G5 | **最终成片**（完整视频 + 技术质检结果 + 已知问题） | 标记整个制作任务交付完成 |
 
 用户说「全部按推荐、不要再问」时，才可跳过对应闸，并在回复写明跳过了哪几闸。  
 一问一答的写法（角色列、`问：`/`答：`、分 region）见 `user-gates.md` 与 `teaching-script.md`。
@@ -33,7 +35,7 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 
 > ⚠️ **edge-tts 很可能不可用**：它按 IP/地区被微软封锁，报
 > `WSServerHandshakeError 403` 时重试无意义，**必须换 apiz**。
-> 动手做第一集前先跑一次探测：`python scripts/gen_tts.py "测试" --out /tmp/p.mp3`。
+> 第一集讲稿确认后，按 G3 准备单句 `preview.yaml`，再交互授权探测：`python scripts/gen_tts.py preview.yaml --preview --out-dir preview_audio`。
 > 403 → 走 `references/apiz-tts-fallback.md`（含安装、登录、可用音色、完整 `build_voice.py`）。
 
 **安装（下载后只要 1 步）**：
@@ -45,13 +47,13 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 
 脚本会建 venv、装依赖（`whiteboard-animator==0.1.1` 引擎，约 83MB 的 CRAFT 模型随 pip 从 PyPI 下载，onnxruntime / edge-tts / Pillow / numpy 等传递依赖自动装上）、检查 ffmpeg 路径（缺失会报错并提示安装）。装完用 `source .venv/bin/activate`（或 `.venv\Scripts\Activate.ps1`），所有 `scripts/*.py` 都在 venv 里直接 `python scripts/xxx.py` 即可。
 
-**质量原则（画面 70% 即交付）**：仅作用于**已过用户确认闸之后**的画面微调——单拍构图对、元素对就过，不逐拍修图。渲染本地零成本，重渲比修图便宜；遵守"skip 已存在"纪律。**不得**用本原则跳过 G1–G4。
+**质量原则（画面 70% 即交付）**：仅作用于**已过用户确认闸之后**的画面微调——单拍构图对、元素对就过，不逐拍修图。渲染本地零成本，重渲比修图便宜；遵守"skip 已存在"纪律。**不得**用本原则跳过 G1–G5。
 
 ## ★ 概念短视频系列（一篇文章一集，已验证量产管线）
 
 做商业/心理/经济**概念科普系列短视频**（如《5分钟商学院》一文章一集）时，走
-**`references/concept-short-video.md`**，并**叠加** `user-gates.md`（每集 G2→G4；系列开头确认 G0/G1/G3）。
-工程管线：`make_boards.py` → `build_narration_fast.py` → check_assignment → 冒烟 → 全量 → verify_media。
+**`references/concept-short-video.md`**，并**叠加** `user-gates.md`（每集 G2→G5；系列开头确认 G0/G1/G3）。
+工程管线：`make_boards.py` → `build_narration_fast.py` → check_assignment → 冒烟 → 全量 → verify_media → G5 成片确认。
 竖屏 720×1280。系列任务先读 concept 文档与 user-gates。
 
 ## ★ 深度内容科普系列（经典书+最新深调研，硬性标准流程）
@@ -59,7 +61,7 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 做"经典书/学科框架 + 最新动态深调研"的深度科普系列时，
 **必须**走 **`references/deep-fact-series.md`**，并**叠加** `user-gates.md`。
 每集制作前 2–6 次真实搜索；`lib/audit_boards.py` 防重叠；
-交付定义 = 用户闸通过 + 审计全绿 + 双轮归属 0 + verify PASS + 抽帧目检通过。
+交付定义 = 用户闸通过（含当前版本 G5 确认或明确豁免）+ 审计全绿 + 双轮归属 0 + verify PASS + 抽帧目检通过。
 
 ## ★ 文章/教程 → 讲解视频:教学讲稿流程(此类任务优先走这条)
 
@@ -70,6 +72,7 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 3. **问题驱动 + 覆盖度**：开场/概念前有问；原文知识点与图片不漏；例子用真材料；≥1 启发点。
 4. **G3 音色**：探测 TTS 后端后贴选项；用户选定 voice/rate 再配音。单拍旁白 ≤50 字。
 5. **G4 + 质检**：`check_assignment` 清零 → 冒烟抽帧经用户同意 → 全量渲染。
+6. **G5 成片确认**：技术质检后提交完整视频，按 `user-gates.md` 等待当前版本确认，才标记交付完成。
 
 ## 成片模式（两种）
 
@@ -133,7 +136,7 @@ python ../ffmpeg-skill/scripts/_contract.py doctor --json
 
 ## 新一集工作流（先过闸，再制作）
 
-开做前读 **`references/user-gates.md`**。顺序：G1 风格 → 写稿 → G2 讲稿确认 → 画板 → G3 音色 → TTS → 归属质检 → G4 冒烟 → 全量。
+开做前读 **`references/user-gates.md`**。顺序：G0 规格 → G1 风格 → 写稿 → G2 讲稿确认 → 画板 → G3 音色 → TTS → 归属质检 → G4 冒烟 → 全量 → 技术质检 → G5 成片确认。
 
 ### 1. 写讲稿 + 拆 region（plan.build.json）
 

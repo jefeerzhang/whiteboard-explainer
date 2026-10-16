@@ -27,6 +27,8 @@ import sys
 import time
 from pathlib import Path
 
+from user_gates import require
+
 import numpy as np
 from PIL import Image
 
@@ -331,6 +333,10 @@ def main() -> int:
     root = plan_path.parent
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     scenes = plan["scenes"]
+
+    if not args.dry_run:
+        require(root, "G3" if args.only else "G4",
+                None if args.only else plan_path)
 
     # 主题：默认主题走原路径（零成本）；换主题则成片后整体染色
     theme_name = args.theme or os.environ.get("WHITEBOARD_THEME") or "whiteboard"

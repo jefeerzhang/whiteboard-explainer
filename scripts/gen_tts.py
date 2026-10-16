@@ -29,6 +29,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from user_gates import confirm_preview, require
+
 EDGE_DEFAULT_VOICE = "zh-CN-XiaoyiNeural"  # 女声清亮；男声可用 zh-CN-YunxiNeural
 EDGE_DEFAULT_VOICE_EN = "en-US-JennyNeural"  # 英文教学默认女声；男声可用 en-US-GuyNeural
 
@@ -97,8 +99,13 @@ def main():
         help="输出目录（默认 public/audio/narration/）",
     )
     parser.add_argument("--dry-run", action="store_true", help="只打印不生成")
+    parser.add_argument("--preview", action="store_true",
+                        help="单句试听，须交互授权，不代替 G3")
     args = parser.parse_args()
 
+    root = Path(args.narration_yaml).resolve().parent
+    if not args.dry_run and not args.preview:
+        require(root, "G3", Path(args.narration_yaml))
     spec = load_narration(Path(args.narration_yaml))
     # voice 选择优先级：yaml 显式 voice > yaml lang 字段 > 默认
     # 英文教学故事（lang: en）默认用 en-US-JennyNeural
@@ -107,8 +114,13 @@ def main():
     voice = spec.get("voice", default_voice)
     speed = float(spec.get("speed", 1.0))
     scenes = spec["scenes"]
+    if not args.dry_run:
+        if args.preview:
+            print(f"Preview: voice={voice}, speed={speed}, texts={[s['text'] for s in scenes]}")
+            confirm_preview(root, [s["text"] for s in scenes])
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"backend=edge, voice={voice}, speed={speed}, scenes={len(scenes)}")
 
@@ -138,6 +150,8 @@ def main():
         })
         print(f"  时长 {seconds:.2f}s")
 
+    if args.dry_run:
+        return
     timeline_path = out_dir / "timeline.json"
     timeline_path.write_text(
         json.dumps(timeline, ensure_ascii=False, indent=2), encoding="utf-8"

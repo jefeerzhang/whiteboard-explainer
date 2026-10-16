@@ -19,6 +19,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from user_gates import require
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_narration as bn  # noqa: E402
 
@@ -45,7 +47,7 @@ def make_fast(rate: str = "+22%"):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("spec", help="plan.build.json")
-    ap.add_argument("--rate", default="+22%")
+    ap.add_argument("--rate", help="须匹配 spec.rate（未指定时使用 spec.rate 或 +22%）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -61,6 +63,11 @@ def main() -> int:
                 print(f"  {mark} {r.get('label','')}: {r.get('annotation','')}")
         return 0
 
+    require(root, "G3", spec_path)
+    rate = args.rate or spec.get("rate", "+22%")
+    if rate != spec.get("rate", "+22%"):
+        raise SystemExit("BLOCKED: --rate must match the approved spec rate")
+
     # 0 字节坏分片先删（edge-tts NoAudioReceived 后 save 可能留 0 字节文件，重跑会被 skip）
     parts = root / spec.get("audio_dir", "audio/narration") / "parts"
     if parts.exists():
@@ -69,7 +76,7 @@ def main() -> int:
                 p.unlink()
                 print(f"  删除坏分片 {p.name}")
 
-    bn.tts = make_fast(args.rate)
+    bn.tts = make_fast(rate)
     asyncio.run(bn.build(spec, root, dry=False))
     return 0
 

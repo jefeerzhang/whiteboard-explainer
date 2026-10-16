@@ -21,6 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from user_gates import require, require_spec
+
 try:
     import edge_tts
 except ImportError:
@@ -74,6 +76,8 @@ def concat(parts: list[Path], out: Path) -> None:
 
 
 async def build(spec: dict, root: Path, dry: bool) -> dict:
+    if not dry:
+        require_spec(root, spec)
     voice = spec.get("voice", "zh-CN-YunxiNeural")
     gap = float(spec.get("gap", 0.35))
     audio_dir = root / spec.get("audio_dir", "audio/narration")
@@ -170,6 +174,7 @@ def main() -> int:
                 print(f"  {mark} {r.get('label','')}: {r.get('annotation','')}")
         return 0
 
+    require(root, "G3", spec_path)
     asyncio.run(build(spec, root, dry=False))
     return 0
 
