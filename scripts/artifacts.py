@@ -9,6 +9,11 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
+
 
 def fingerprint(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
@@ -40,8 +45,12 @@ def atomic_json(path: Path, value: object) -> None:
                                  allow_nan=False).encode("utf-8"))
 
 
+def relative(path: Path, base: Path) -> str:
+    return Path(os.path.relpath(path.resolve(), base.resolve())).as_posix()
+
+
 @contextmanager
-def file_lock(path: Path):
+def file_lock(path: Path, owner: str = "narration"):
     """Reject competing producers rather than overwrite an in-flight output."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as stream:
@@ -52,20 +61,16 @@ def file_lock(path: Path):
         stream.seek(0)
         try:
             if sys.platform == "win32":
-                import msvcrt
                 msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
             else:
-                import fcntl
                 fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise ValueError("Another narration producer owns this output; retry later") from exc
+            raise ValueError(f"Another {owner} producer owns this output; retry later") from exc
         try:
             yield
         finally:
             stream.seek(0)
             if sys.platform == "win32":
-                import msvcrt
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
                 fcntl.flock(stream, fcntl.LOCK_UN)

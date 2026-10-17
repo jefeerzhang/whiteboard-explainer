@@ -1,7 +1,7 @@
 """Local narration preparation shared by approval and production CLIs."""
 from __future__ import annotations
 
-import importlib.util
+import importlib
 import json
 import math
 import re
@@ -10,13 +10,20 @@ import subprocess
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from PIL import Image, ImageFont
+
+from teaching import teaching_plan
+
+try:
+    import yaml  # type: ignore[import-untyped]
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+
 
 def read_document(path: Path):
     text = path.read_text(encoding="utf-8-sig")
     if path.suffix.lower() in (".yaml", ".yml"):
-        try:
-            import yaml  # type: ignore[import-untyped]
-        except ImportError:
+        if yaml is None:
             raise ValueError("YAML input requires PyYAML; JSON input needs no extra parser")
         spec = yaml.safe_load(text)
     else:
@@ -75,6 +82,31 @@ def positive(value, name: str) -> float:
     return number
 
 
+def normalize_canvas(value) -> list[int]:
+    if (not isinstance(value, list) or len(value) != 2
+            or any(isinstance(v, bool) or not isinstance(v, int)
+                   or not 2 <= v <= 1280 or v % 2 for v in value)):
+        raise ValueError("canvas needs two even dimensions within 2..1280")
+    return value
+
+
+def board_canvas(path: Path) -> list[int]:
+    with Image.open(path) as image:
+        width, height = image.size
+    scale = min(1.0, 1280 / max(width, height))
+    return [max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)]
+
+
+def board_image(path: Path, canvas: list[int] | None = None):
+    with Image.open(path) as image:
+        rgba = image.convert("RGBA")
+        flat = Image.alpha_composite(Image.new("RGBA", rgba.size, "white"), rgba).convert("RGB")
+    if canvas is not None:
+        normalize_canvas(canvas)
+        flat = flat.resize((canvas[0], canvas[1]), Image.Resampling.LANCZOS)
+    return flat
+
+
 def spoken_text(region: dict, source: str = "annotation") -> str:
     text = region.get("spoken_text", region.get(source, ""))
     if not isinstance(text, str):
@@ -89,13 +121,14 @@ def validate_spec(spec: dict, root: Path, mode: str, allow_empty: bool = False) 
     gap = spec.get("gap", 0.35)
     if isinstance(gap, bool) or not math.isfinite(float(gap)) or float(gap) < 0:
         raise ValueError("gap must be a nonnegative finite number")
-    canvas = spec.get("canvas", [1280, 720])
-    if not isinstance(canvas, list) or len(canvas) != 2:
-        raise ValueError("canvas requires width and height")
-    for value in canvas:
-        positive(value, "canvas")
-        if not isinstance(value, int) or isinstance(value, bool):
-            raise ValueError("canvas dimensions must be integers")
+    normalize_canvas(spec.get("canvas", [1280, 720]))
+    fps = spec.get("fps", 24)
+    if isinstance(fps, bool) or not isinstance(fps, int) or not 1 <= fps <= 120:
+        raise ValueError("fps must be an integer within 1..120")
+    tail = spec.get("tail_pad", 0)
+    if (isinstance(tail, bool) or not isinstance(tail, (int, float))
+            or not math.isfinite(tail) or not 0 <= tail <= 120):
+        raise ValueError("tail_pad must be within 0..120 seconds")
     if not isinstance(spec.get("idea", ""), str):
         raise ValueError("idea must be a string")
     audio_dir = spec.get("audio_dir", "audio/narration")
@@ -115,7 +148,6 @@ def validate_spec(spec: dict, root: Path, mode: str, allow_empty: bool = False) 
             if not spoken_text(scene, "text"):
                 raise ValueError(f"{sid}: text must be nonempty")
             continue
-        from PIL import Image
         image = scene.get("image")
         if not isinstance(image, str):
             raise ValueError(f"{sid}: image path is required")
@@ -149,11 +181,11 @@ def validate_spec(spec: dict, root: Path, mode: str, allow_empty: bool = False) 
                 if y0 >= y1 or x0 >= x1:
                     raise ValueError(f"{sid}: box must have positive width and height")
     if spec.get("font"):
-        from PIL import ImageFont
         try:
             ImageFont.truetype(str(root / spec["font"]), 24)
         except OSError as exc:
             raise ValueError("The requested font cannot be loaded") from exc
+    teaching_plan(spec)
 
 
 def local_tools() -> dict:
@@ -167,8 +199,14 @@ def local_tools() -> dict:
                             capture_output=True, text=True, errors="replace", timeout=30)
     if result.returncode or "libx264" not in result.stdout:
         raise ValueError("ffmpeg must support libx264")
-    if importlib.util.find_spec("edge_tts") is None:
-        raise ValueError("The selected backend requires edge-tts")
+    probe = subprocess.run([tools["ffprobe"], "-version"], capture_output=True,
+                           text=True, errors="replace", timeout=30)
+    if probe.returncode or "ffprobe" not in probe.stdout:
+        raise ValueError("ffprobe is not executable")
+    try:
+        importlib.import_module("edge_tts")
+    except ImportError as exc:
+        raise ValueError("The selected backend requires an importable edge-tts SDK") from exc
     return tools
 
 
@@ -179,8 +217,11 @@ def inspection_report(spec: dict, root, mode: str = "standard",
     if runtime:
         local_tools()
     return {"status": "PASS", "config": config,
+            "teaching_plan": teaching_plan(spec),
             "canvas": spec.get("canvas", [1280, 720]),
+            "fps": spec.get("fps", 24),
             "scenes": [scene["id"] for scene in spec["scenes"]],
+            "remote": "NOTRUN",
             "runtime": "PASS" if runtime else "NOTRUN"}
 
 
@@ -188,3 +229,8 @@ def print_inspection(spec: dict, root, mode: str = "standard",
                      rate: str | None = None, runtime: bool = False) -> None:
     print(json.dumps(inspection_report(spec, root, mode, rate, runtime),
                      ensure_ascii=True))
+
+
+def print_design(spec: dict) -> None:
+    print(json.dumps({"status": "PASS", "stage": "DESIGN",
+                      "teaching_plan": teaching_plan(spec)}, ensure_ascii=True))

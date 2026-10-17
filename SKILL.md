@@ -17,7 +17,7 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 **禁止**在未获用户明确同意时连续完成「写稿→画板→配音→渲染」。  
 完整协议、选项表、确认话术模板见 **`references/user-gates.md`**。开做前必须读。
 脚本审批入口：`scripts/user_gates.py`。每集独立保存 `.user-gates.json`；用户交互确认，文件变更使确认失效。自定义绘图/TTS 命令必须用其 `run` 子命令包裹，详见上述协议。
-内置配音的本地预检、G3 有效配置、内容缓存与运行清单见 **`references/narration-workflow.md`**。该能力不代表视频缓存和 G4/G5 证据闭环已实现。
+内置配音的本地预检、G3 与配音清单见 **`references/narration-workflow.md`**。视频缓存、类型化 G4/G5 回执、可选教学设计与停顿见 **`references/render-workflow.md`**。
 
 | 闸 | 确认什么 | 未通过时禁止 |
 |---|---|---|
@@ -106,7 +106,7 @@ preview 即成物）、story-handdrawn-video。
 遵循 probe-first → dry-run 规划 → 执行 → verify-after → 抽帧目检。本 skill 内建的最小校验：
 
 - 渲染前:`scripts/check_assignment.py plan.json` 组件归属清零(防"讲到 A 时 B 提前画")
-- `render_explainer.py`：concat 后自动 probe 成片，时长 ≠ 分拍合计 → 删坏文件并指出异常分拍
+- `render_explainer.py`：校验归属、cue、帧率、画幅、完整解码与时长，再发布输出；失败保留 FAIL 回执，不删除用户原有文件
 - `scripts/verify_media.py`：使用本地 ffprobe/ffmpeg 批量校验产物（存在/完整解码/时长±0.75s），不依赖同级 skill；`--metadata-only` 不代表解码通过
 
 ```bash

@@ -1,19 +1,41 @@
 """A narration run owns its processed audio, cue plan and evidence."""
 from __future__ import annotations
 
-import os
 import uuid
+import json
 from pathlib import Path
 
-from artifacts import atomic_json, file_digest, fingerprint
+from artifacts import atomic_json, file_digest, fingerprint, relative
 from media import verify
 
 
 VERSION = 1
 
 
-def relative(path: Path, base: Path) -> str:
-    return Path(os.path.relpath(path.resolve(), base.resolve())).as_posix()
+def read_run(path: Path) -> tuple[dict, set[Path]]:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(report, dict) or report.get("schema") != VERSION
+                or report.get("stage") != "narration" or report.get("status") != "PASS"):
+            raise ValueError("incomplete or unsupported run")
+        artifact = (path.parent / report["artifact"]).resolve()
+        if file_digest(artifact) != report["artifact_sha256"]:
+            raise ValueError("plan fingerprint changed")
+        files = {path.resolve(), artifact}
+        if "source" not in report["inputs"]:
+            raise ValueError("legacy narration run needs regeneration to record its source")
+        source = Path(report["inputs"]["source"])
+        if file_digest(source) != report["inputs"]["source_sha256"]:
+            raise ValueError("narration source changed; regenerate the narration run")
+        files.add(source.resolve())
+        for item in report["media"]:
+            audio = (path.parent / item["path"]).resolve()
+            if item["kind"] != "audio" or file_digest(audio) != item["sha256"]:
+                raise ValueError("audio fingerprint changed")
+            files.add(audio)
+        return report, files
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"Narration run is missing, stale or invalid: {exc}") from exc
 
 
 class NarrationRun:
@@ -25,10 +47,11 @@ class NarrationRun:
         implementation = {
             name: file_digest(Path(__file__).with_name(name))
             for name in ("production.py", "media.py", "narration_cache.py",
-                         "narration_runs.py", "build_narration.py", "gen_tts.py")
+                         "narration_runs.py", "build_narration.py", "gen_tts.py",
+                         "teaching.py", "audio_timing.py")
         }
         inputs = {
-            "source_sha256": file_digest(source), "config": config,
+            "source": str(source.resolve()), "source_sha256": file_digest(source), "config": config,
             "images": {s["id"]: file_digest(root / s["image"])
                        for s in spec["scenes"] if s.get("image")},
             "implementation": implementation,
@@ -46,11 +69,13 @@ class NarrationRun:
         }
         atomic_json(self.manifest, self.report)
 
-    def record(self, sid: str, path: Path | None, regions: list, facts: list[dict]) -> None:
+    def record(self, sid: str, path: Path | None, regions: list, facts: list[dict],
+               timing: dict | None = None) -> None:
         for entry in facts:
             for field in ("generated", "reused"):
                 self.report["tts"][field] += entry[field]
         scene: dict = {"id": sid, "regions": regions, "sources": facts}
+        scene.update(timing or {})
         if path is not None:
             result = verify(path, kind="audio")
             item = {

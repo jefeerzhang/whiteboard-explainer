@@ -95,6 +95,13 @@ python lib/tools/demo_themes.py      # 一张图看全部主题
 体检会拦住一个容易踩的坑：**辅助文字色（`muted`）若与底色同色相且偏浅，小字会被二值化切碎**
 （实测 `#8496A8` 配 `#EAF1FB` 让 30px 中文碎成 98 块）。所以 `muted` 一律灰度 ≲125 且色相与底色拉开。
 
+## 制作流程与开发验证
+
+- 用户确认与阶段拦截：[user-gates.md](references/user-gates.md)。
+- 配音有效配置、内容缓存与运行清单：[narration-workflow.md](references/narration-workflow.md)。
+- 视频缓存、G4/G5 类型化回执、教学设计与思考停顿：[render-workflow.md](references/render-workflow.md)。
+- 开发测试只证明对应夹具与检查范围，不代替真实配音、白板绘制质量或用户完整观看确认。
+
 ## 文件结构
 
 ```

@@ -22,6 +22,8 @@ from pathlib import Path
 
 from artifacts import file_digest
 from media import verify
+from narration_runs import read_run
+from render_contract import validate_evidence
 
 TOL = 0.75  # 时长容差（秒）。mp3 分片重编码/关键帧裁剪有固有偏差
 
@@ -43,12 +45,13 @@ def main():
         manifest = Path(args.manifest).resolve()
         content = json.loads(manifest.read_text(encoding="utf-8"))
         if isinstance(content, dict):
-            if (content.get("schema") != 1 or content.get("stage") != "narration"
-                    or content.get("status") != "PASS"):
-                raise SystemExit("Run manifest is incomplete or unsupported")
-            artifact = manifest.parent / content["artifact"]
-            if file_digest(artifact) != content["artifact_sha256"]:
-                raise SystemExit("Run artifact no longer matches its manifest")
+            if content.get("stage") in ("sample", "render"):
+                if args.metadata_only or args.file or args.expect is not None or args.kind:
+                    raise SystemExit("Verify render receipts separately with complete decoding")
+                validate_evidence(manifest, content["stage"])
+                print("PASS: render receipt verified with complete decoding")
+                return
+            content, _ = read_run(manifest)
             content = content["media"]
         for item in content:
             items.append({**item, "path": str(manifest.parent / item["path"])})

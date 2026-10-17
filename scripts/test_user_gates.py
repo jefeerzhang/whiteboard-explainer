@@ -39,20 +39,35 @@ class GateTests(unittest.TestCase):
                 gates.approve(self.root, "G0", [self.artifact])
         self.assertFalse((self.root / gates.STATE_FILE).exists())
 
+    def test_parent_changed_while_confirmation_waited_cannot_be_overwritten(self):
+        self.approve_through("G2")
+        revised = self.root / "revised.md"
+        revised.write_text("a different approved script")
+
+        def confirm_after_parent_changed(prompt):
+            with patch("builtins.input", return_value="CONFIRM G2"):
+                gates.approve(self.root, "G2", [revised])
+            return "CONFIRM G3"
+
+        with patch("builtins.input", side_effect=confirm_after_parent_changed):
+            with self.assertRaises(gates.GateError):
+                gates.approve(self.root, "G3", [self.artifact])
+        self.assertNotIn("G3", gates.load(self.root))
+
     def test_changed_missing_and_unapproved_inputs_block(self):
-        self.approve_through("G5")
-        gates.require(self.root, "G5", self.artifact)
+        self.approve_through("G3")
+        gates.require(self.root, "G3", self.artifact)
         with self.assertRaises(gates.GateError):
-            gates.require(self.root, "G5", self.root / "other.mp4")
+            gates.require(self.root, "G3", self.root / "other.mp4")
         self.artifact.write_text("changed", encoding="utf-8")
         with self.assertRaises(gates.GateError):
-            gates.require(self.root, "G5")
+            gates.require(self.root, "G3")
         self.artifact.unlink()
         with self.assertRaises(gates.GateError):
-            gates.require(self.root, "G5")
+            gates.require(self.root, "G3")
 
     def test_reapproval_clears_downstream(self):
-        self.approve_through("G5")
+        self.approve_through("G3")
         with patch("builtins.input", return_value="CONFIRM G2"):
             gates.approve(self.root, "G2", [self.artifact])
         gates.require(self.root, "G2")

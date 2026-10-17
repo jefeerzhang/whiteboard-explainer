@@ -5,6 +5,7 @@ import json
 import math
 import shutil
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 
@@ -43,5 +44,16 @@ def verify(path: Path, *, kind: str | None = None, decode: bool = True) -> dict:
         )
         if decoded.returncode or decoded.stderr.strip():
             raise ValueError(f"Complete media decode failed: {path}")
-    return {"duration": duration, "streams": sorted(k for k in kinds if k),
-            "metadata": "PASS", "decode": "PASS" if decode else "NOTRUN"}
+    result_data: dict = {"duration": duration, "streams": sorted(k for k in kinds if k),
+                         "metadata": "PASS", "decode": "PASS" if decode else "NOTRUN"}
+    videos = [s for s in streams if s.get("codec_type") == "video"]
+    if videos:
+        video = videos[0]
+        try:
+            fps = float(Fraction(video.get("avg_frame_rate") or video["r_frame_rate"]))
+        except (ValueError, ZeroDivisionError) as exc:
+            raise ValueError("Video has an invalid frame rate") from exc
+        if fps <= 0 or int(video["width"]) <= 0 or int(video["height"]) <= 0:
+            raise ValueError("Video has an invalid frame rate or dimensions")
+        result_data["video"] = {"fps": fps, "width": int(video["width"]), "height": int(video["height"])}
+    return result_data

@@ -22,10 +22,16 @@ import sys
 from pathlib import Path
 
 from artifacts import atomic_json, file_lock
+from audio_timing import pad_scene, silent_scene
 from narration_cache import get_audio
 from narration_runs import NarrationRun, relative
-from production import inspection_report, narration_config, print_inspection, read_spec, spoken_text
+from production import inspection_report, narration_config, print_design, print_inspection, read_spec, spoken_text
 from user_gates import require, require_spec
+
+try:
+    import edge_tts
+except ImportError:
+    edge_tts = None  # type: ignore[assignment]
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, capture_output=True,
@@ -40,8 +46,8 @@ def probe_duration(path: Path) -> float:
 
 async def tts(text: str, out: Path, voice: str, rate: str = "+0%") -> None:
     """edge-tts 偶发 NoAudioReceived/网络抖动，重试 3 次。"""
-    import edge_tts
-
+    if edge_tts is None:
+        raise ValueError("The selected backend requires edge-tts")
     last = None
     for attempt in range(3):
         try:
@@ -101,8 +107,13 @@ async def _build_run(spec: dict, root: Path, config: dict, current: NarrationRun
     plan = {
         "idea": spec.get("idea", ""),
         "canvas": spec.get("canvas", [1280, 720]),
+        "fps": spec.get("fps", 24),
+        "teaching": spec.get("teaching", False),
         "scenes": [],
     }
+    audio_mode = spec.get("teaching", False) or any(
+        spoken_text(region) for scene in spec["scenes"] for region in scene.get("regions", [])
+    )
 
     for scene in spec["scenes"]:
         sid = scene["id"]
@@ -114,6 +125,7 @@ async def _build_run(spec: dict, root: Path, config: dict, current: NarrationRun
         scene_audio = audio_dir / f"{sid}.wav"
         windows: dict[int, tuple[float, float]] = {}
         scene_facts = []
+        timing = {}
 
         if spoken:
             # 1. 逐子句 TTS
@@ -142,9 +154,19 @@ async def _build_run(spec: dict, root: Path, config: dict, current: NarrationRun
                 # 尾部窗口 clamp 到实际音轨长度
                 for idx, (s, e) in windows.items():
                     windows[idx] = (s, min(e, total))
+                timing = pad_scene(scene_audio, float(scene.get("hold", 0)),
+                                   plan["fps"], float(spec.get("tail_pad", 0)))
+        elif audio_mode:
+            silent_scene(scene_audio, float(scene.get("duration", 8)))
+            timing = pad_scene(scene_audio, float(scene.get("hold", 0)),
+                               plan["fps"], float(spec.get("tail_pad", 0)))
 
         out_scene = {"id": sid, "image": scene["image"]}
-        if windows:
+        out_scene.update(timing)
+        for key in ("role", "visual"):
+            if key in scene:
+                out_scene[key] = scene[key]
+        if windows or timing:
             out_scene["audio"] = relative(scene_audio, root)
         elif scene.get("duration"):
             out_scene["duration"] = scene["duration"]
@@ -164,7 +186,7 @@ async def _build_run(spec: dict, root: Path, config: dict, current: NarrationRun
             out_regions.append(entry)
         out_scene["regions"] = out_regions
         plan["scenes"].append(out_scene)
-        current.record(sid, scene_audio if windows else None, out_regions, scene_facts)
+        current.record(sid, scene_audio if windows or timing else None, out_regions, scene_facts, timing)
         total = sum(e - s for s, e in windows.values()) if windows else scene.get("duration", 0)
         print(f"{sid}: {len(regions)} regions, cue 总时长 {total:.1f}s")
 
@@ -175,6 +197,7 @@ async def _build_run(spec: dict, root: Path, config: dict, current: NarrationRun
         if scene.get("audio"):
             scene["audio"] = relative(root / scene["audio"], current.directory)
     plan["narration"] = current.complete(archived)
+    plan["narration"]["fps"] = plan["fps"]
     atomic_json(out_path, plan)
     print(f"写出 {out_path}")
     return plan
@@ -185,11 +208,15 @@ def main() -> int:
     ap.add_argument("spec", help="plan.build.json")
     ap.add_argument("--dry-run", action="store_true", help="只打印子句，不 TTS")
     ap.add_argument("--preflight", action="store_true", help="仅检查本地输入和运行依赖")
+    ap.add_argument("--design-only", action="store_true", help="G2 前只展示教学画面计划，不读取画板")
     args = ap.parse_args()
 
     spec_path = Path(args.spec).resolve()
     root = spec_path.parent
     spec = read_spec(spec_path)
+    if args.design_only:
+        print_design(spec)
+        return 0
 
     if args.dry_run or args.preflight:
         print_inspection(spec, root, runtime=args.preflight)

@@ -2,7 +2,7 @@
 
 本流程覆盖本地预检、媒体校验、G3 有效配置、旁白缓存和本次音轨/cue 归属。
 任务编号指十张任务草案中的 1–5，不是总规格中的工作包 W1–W5。
-不代表视频缓存、G4/G5 技术证据闭环或教学停顿已实现。完整制作仍遵守 [用户确认协议](user-gates.md)。
+视频缓存、G4/G5 技术证据与教学停顿见 [render-workflow.md](render-workflow.md)。完整制作遵守 [用户确认协议](user-gates.md)。
 
 ## 1. 本地预检
 
@@ -65,7 +65,7 @@ python <skill>/scripts/gen_tts.py narration.json --out-dir audio/narration
 - `narration.manifest` 指向本次运行清单；`generated` / `reused` 是本次真实合成和复用次数。
 - 清单记录输入与实现指纹、实际音轨及哈希、cue、期望时长和解码结果。
 - 运行目录另存可独立解析相对素材路径的计划快照。
-- 当前旁白与 cue 通过已处理的 PCM 音轨计算；本轮没有新增教学 hold 或视频帧锁功能。
+- 当前旁白与 cue 通过实际 PCM 计算；hold/尾垫追加静音并向上补齐视频帧，cue 不延伸进停顿。
 
 `gen_tts` 在输出目录保留 `timeline.json` 入口；其中的音轨和清单路径相对于输入项目目录。
 每次运行另存自己的 timeline 快照，CLI 输出对应清单与缓存事实。
@@ -88,7 +88,7 @@ python <skill>/scripts/verify_media.py --file audio.wav --metadata-only
 
 ## 5. 开发验证
 
-默认测试不请求真实 TTS、不渲染视频。使用可计数的 SDK 替身生成短 PCM 夹具，并经本地 ffmpeg/ffprobe 验证真实编解码路径。
+默认测试不请求真实 TTS，也不调用实际白板绘制后端。使用可计数的 SDK 替身、PCM 和彩色帧夹具，经本地 ffmpeg/ffprobe 验证真实编解码、抽帧与时序。
 不将这些夹具检查报告为真实中文旁白或完整出片验证。
 
 ```bash

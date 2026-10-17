@@ -18,10 +18,11 @@ import json
 from pathlib import Path
 
 from artifacts import atomic_bytes, atomic_json, file_lock
+from audio_timing import pad_scene
 from build_narration import tts
 from narration_cache import get_audio
 from narration_runs import NarrationRun, relative
-from production import inspection_report, narration_config, print_inspection, read_spec, spoken_text
+from production import inspection_report, narration_config, print_design, print_inspection, read_spec, spoken_text
 from user_gates import confirm_preview, require, require_spec
 
 def load_narration(path: Path) -> dict:
@@ -39,14 +40,18 @@ def main():
     )
     parser.add_argument("--dry-run", action="store_true", help="只打印不生成")
     parser.add_argument("--preflight", action="store_true", help="仅执行本地预检")
+    parser.add_argument("--design-only", action="store_true")
     parser.add_argument("--preview", action="store_true",
                         help="单句试听，须交互授权，不代替 G3")
     args = parser.parse_args()
 
     root = Path(args.narration_yaml).resolve().parent
-    if not args.dry_run and not args.preflight and not args.preview:
+    if not args.dry_run and not args.preflight and not args.design_only and not args.preview:
         require(root, "G3", Path(args.narration_yaml))
     spec = load_narration(Path(args.narration_yaml))
+    if args.design_only:
+        print_design(spec)
+        return
     if args.dry_run or args.preflight:
         print_inspection(spec, root, "scene", runtime=args.preflight)
         return
@@ -74,10 +79,12 @@ def main():
                 cached, seconds, facts = asyncio.run(get_audio(
                     text, config, root / ".narration-cache", tts))
                 atomic_bytes(out_path, cached.read_bytes())
-                current.record(sid, out_path, [], [facts])
+                timing = pad_scene(out_path, float(sc.get("hold", 0)), spec.get("fps", 24),
+                                   float(spec.get("tail_pad", 0)))
+                current.record(sid, out_path, [], [facts], timing)
                 timeline.append({
                     "id": sid, "file": relative(out_path, root), "text": sc["text"],
-                    "spoken_text": text, "seconds": round(seconds, 3),
+                    "spoken_text": text, "seconds": timing["frames"] / timing["fps"], **timing,
                     "manifest": relative(current.manifest, root),
                 })
             archived = [{**item, "file": relative(root / item["file"], current.directory),

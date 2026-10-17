@@ -43,7 +43,7 @@ python scripts/build_narration_fast.py plan.build.json
 ```
 
 快速版在加工音频时裁首尾静音，原始合成按实际语速单独缓存。改语速后重新确认 G3，由内容指纹决定重配，无须删除旧分片。
-视频缓存尚未改造；视频强制重渲仍需通过 G4 并显式选择 `--force`。详细迁移与运行清单见 [narration-workflow.md](narration-workflow.md)。
+视频按输入与配置指纹复用；更改方案后重新生成样片并确认 G4。已有输出仅在用户明确选择 `--force` 时替换，历史运行保留。详细回执与教学计划见 [render-workflow.md](render-workflow.md)。
 
 ## 讲稿自检清单(附在 讲稿.md 末尾)
 

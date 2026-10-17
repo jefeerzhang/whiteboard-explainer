@@ -7,8 +7,10 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from artifacts import atomic_json, file_digest
+from artifacts import atomic_json, file_digest, file_lock, fingerprint
 from production import narration_config, read_document
+from render_contract import validate_evidence
+from teaching import artifact_design, teaching_plan
 
 
 STATE_FILE = ".user-gates.json"
@@ -44,6 +46,17 @@ def require(root: Path, gate: str, artifact: Path | None = None) -> None:
         record = data.get(name)
         if not isinstance(record, dict) or not record.get("artifacts"):
             raise GateError(f"BLOCKED: {name} approval missing in {root / STATE_FILE}")
+        if name in ("G4", "G5"):
+            try:
+                proof, _ = validate_evidence(Path(record["evidence"]),
+                                             "sample" if name == "G4" else "render")
+                require_narration(root, proof["context"])
+                if proof["context"]["key"] != record["render_key"]:
+                    raise ValueError(f"{name} render context differs")
+                if name == "G5" and record["render_key"] != data["G4"]["render_key"]:
+                    raise ValueError("G5 does not match the confirmed G4 sample")
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                raise GateError(f"BLOCKED: {name} evidence is missing, stale or invalid: {exc}")
         try:
             for filename, expected in record["artifacts"].items():
                 if digest(Path(filename)) != expected:
@@ -61,18 +74,43 @@ def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard"
     index = GATES.index(gate)
     if index:
         require(root, GATES[index - 1])
+    parent_version = fingerprint(load(root).get(GATES[index - 1])) if index else None
     if not artifacts:
         raise GateError("BLOCKED: at least one artifact is required")
     files = {p.resolve() for p in artifacts}
+    evidence = None
+    if gate in ("G4", "G5"):
+        try:
+            stage = "sample" if gate == "G4" else "render"
+            candidates = [p for p in files if p.suffix.lower() == ".json"
+                          and isinstance(read_document(p), dict)
+                          and read_document(p).get("stage") == stage]
+            if len(candidates) != 1:
+                raise ValueError(f"{gate} requires exactly one {stage} receipt")
+            evidence = candidates[0]
+            proof, dependencies = validate_evidence(evidence, stage)
+            require_narration(root, proof["context"])
+            if gate == "G5" and proof["context"]["key"] != load(root)["G4"]["render_key"]:
+                raise ValueError("G5 does not match the confirmed G4 sample")
+            files.update(dependencies)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise GateError(f"BLOCKED: {gate} evidence: {exc}")
     narration = {}
+    designs = []
     # Bind referenced boards/audio too, not just the JSON pointing at them.
     for path in list(files):
         if path.suffix.lower() in (".json", ".yaml", ".yml"):
             content = read_document(path)
             if isinstance(content, dict):
+                if gate == "G2":
+                    design = artifact_design(content)
+                    if design is not None:
+                        designs.append(design)
                 if gate == "G3" and "scenes" in content:
                     narration[str(path)] = narration_config(content, mode)
                 for scene in content.get("scenes", []):
+                    if not isinstance(scene, dict):
+                        continue
                     for key in ("image", "audio"):
                         if scene.get(key):
                             files.add((path.parent / scene[key]).resolve())
@@ -82,25 +120,38 @@ def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard"
         print(f"  {filename}")
     if narration:
         print("Effective narration: " + json.dumps(narration, ensure_ascii=True))
+    if evidence is not None:
+        print("Effective render: " + json.dumps(proof["context"]["config"], ensure_ascii=True))
+    if designs:
+        print("Teaching design: " + json.dumps(designs, ensure_ascii=True))
     try:
         answer = input(f"After reviewing them, type CONFIRM {gate}: ")
     except EOFError:
         raise GateError("BLOCKED: interactive confirmation required")
     if answer != f"CONFIRM {gate}":
         raise GateError("BLOCKED: confirmation cancelled")
-    # Recheck after the prompt so a changed file is never approved unseen.
-    if any(digest(Path(p)) != h for p, h in hashes.items()):
-        raise GateError("BLOCKED: artifact changed during confirmation")
-    if index:
-        require(root, GATES[index - 1])
-    data = load(root)
-    for name in GATES[index:]:
-        data.pop(name, None)
-    data[gate] = {"artifacts": hashes,
-                  "confirmed_at": datetime.now(timezone.utc).isoformat()}
-    if gate == "G3":
-        data[gate]["narration"] = narration
-    atomic_json(root / STATE_FILE, data)
+    # The prompt holds no lock; commit only against the parent the user reviewed.
+    with file_lock(root / ".user-gates.lock", "approval"):
+        if any(digest(Path(p)) != h for p, h in hashes.items()):
+            raise GateError("BLOCKED: artifact changed during confirmation")
+        if index:
+            require(root, GATES[index - 1])
+        data = load(root)
+        if index and fingerprint(data.get(GATES[index - 1])) != parent_version:
+            raise GateError("BLOCKED: previous approval changed while confirmation waited; confirm again")
+        if evidence is not None:
+            require_narration(root, proof["context"])
+        for name in GATES[index:]:
+            data.pop(name, None)
+        data[gate] = {"artifacts": hashes,
+                      "confirmed_at": datetime.now(timezone.utc).isoformat()}
+        if gate == "G3":
+            data[gate]["narration"] = narration
+        if gate == "G2":
+            data[gate]["teaching_plans"] = [fingerprint(design) for design in designs]
+        if evidence is not None:
+            data[gate].update({"evidence": str(evidence), "render_key": proof["context"]["key"]})
+        atomic_json(root / STATE_FILE, data)
     print(f"Recorded {gate}; downstream approvals cleared.")
 
 
@@ -119,6 +170,7 @@ def confirm_preview(root: Path, texts: list[str]) -> None:
 def require_spec(root: Path, spec: dict, mode: str = "standard",
                  rate: str | None = None) -> Path:
     require(root, "G3")
+    require_teaching(root, spec)
     record = load(root.resolve())["G3"]
     for filename in record["artifacts"]:
         path = Path(filename)
@@ -129,6 +181,26 @@ def require_spec(root: Path, spec: dict, mode: str = "standard",
                 return path
             raise GateError("BLOCKED: G3 effective configuration differs or is missing; reapprove G3")
     raise GateError("BLOCKED: G3 does not approve this narration spec")
+
+
+def require_teaching(root: Path, spec: dict) -> None:
+    design = teaching_plan(spec)
+    if design is not None and fingerprint(design) not in load(root)["G2"].get("teaching_plans", []):
+        raise GateError("BLOCKED: G2 must confirm this teaching design before narration")
+
+
+def require_render(root: Path, key: str) -> None:
+    require(root, "G4")
+    if load(root)["G4"].get("render_key") != key:
+        raise GateError("BLOCKED: G4 does not approve this render configuration; create a new sample")
+
+
+def require_narration(root: Path, context: dict) -> None:
+    narration = context.get("narration")
+    if narration is not None:
+        approved = load(root)["G3"].get("narration", {})
+        if not isinstance(approved, dict) or approved.get(narration["source"]) != narration["config"]:
+            raise GateError("BLOCKED: G3 narration configuration changed; regenerate narration")
 
 
 def main() -> int:

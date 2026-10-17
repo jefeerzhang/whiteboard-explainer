@@ -2,13 +2,13 @@
 
 > 目的：禁止 Agent「一路干到底」。内容、风格、音色必须先让用户选，再进入绘图 / TTS / 渲染。
 > 适用范围：本 skill 全部成片任务（单集、系列、文章转视频、深度科普）。
-> 用户口头豁免（例如「全部按推荐，不要再问」）时，才可以跳过对应闸门，并在回复里写明跳过了哪几闸。
+> 用户明确豁免时，只免除对应人工选择或观看；记录豁免范围并交互录入，不绕过必要技术检查和审批记录。
 
 ## 总规则
 
 1. **未获用户明确同意，不得执行**：绘图（`make_boards`）、TTS（`build_narration*` / `build_voice`）、渲染（`render_explainer`）。
 2. **每次请用户决定时**：用编号选项；推荐项放第一，标「（推荐）」；每项写动作与后果。
-3. **用户改口时**：从被改的那一闸重来；下游产物（boards / audio / plan.json / out）按需删除后重做。
+3. **用户改口时**：从被改的那一闸重来；重新生成受影响产物并保留历史副本，不自动删除旧素材。
 4. **「70% 即交付」只作用于画面微调**：构图对、元素对即可，不逐拍修图。它**不**允许跳过下列闸门。
 5. **确认绑定版本**：每集通过 `scripts/user_gates.py` 保存 `.user-gates.json`，记录确认版本及文件 SHA-256。受保护入口在缺少确认、文件缺失或内容变化时停止。重新确认某闸会清除下游确认。口头同意或豁免也必须经交互录入，不能靠聊天记录绕过脚本。
 
@@ -26,11 +26,11 @@ python <skill>/scripts/user_gates.py --root . run boards -- python make_boards.p
 python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
 python <skill>/scripts/build_narration_fast.py plan.build.json
 python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4 --only s01
-# 用户看过单拍与抽帧后，同时绑定渲染计划、样片和抽帧：
-python <skill>/scripts/user_gates.py --root . approve G4 --artifact plan.json --artifact out/video_parts/s01.mp4 --artifact out/sample.png
+# 用户看过单拍与抽帧后，使用 REPORT.receipt 的实际路径：
+python <skill>/scripts/user_gates.py --root . approve G4 --artifact <sample.json路径>
 python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4
-# 技术质检后，用户完整观看并确认；将实际检查结果保存为 verification.txt：
-python <skill>/scripts/user_gates.py --root . approve G5 --artifact out/video.mp4 --artifact verification.txt
+# 用户完整观看后，确认全量运行的类型化回执：
+python <skill>/scripts/user_gates.py --root . approve G5 --artifact <render.json路径>
 python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 ```
 
@@ -39,7 +39,8 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 - 审批 JSON 含场景 `image` / `audio` 时，同时记录引用文件的哈希。后续改变画板或音频也会使确认失效。
 - 支持 `--dry-run` 的入口在该模式下不要求确认。G3 前的单句探测用 `gen_tts.py preview.yaml --preview --out-dir <试听目录>`；YAML 只能有一条非空、至多 100 字的文本，且需 G2 和额外输入 `CONFIRM PREVIEW`。该授权不通过 G3；YAML 解析依赖 `requirements.txt` 中的 PyYAML。
 - 自定义 `build_voice.py`、外部 apiz 和其他制作程序必须用 `user_gates.py run tts -- <命令>` 包裹；自定义交付命令用 `run deliver`。只有受保护入口和该包装器执行拦截，直接调用外部工具不受控制。
-- 这不是安全沙箱。能改脚本或审批文件的人仍能绕过；哈希证明版本未变，不证明用户实际观看，也不替代技术质检。当前 G4/G5 尚未强制验证证据类型；写稿与最终交付仍须 Agent 遵守协议。
+- G4/G5 强制验证样片/全量回执类型、方案、产物和必要检查。教学设计、视频缓存和回执迁移见 [render-workflow.md](render-workflow.md)。
+- 这不是安全沙箱。能改脚本或审批文件的人仍能绕过；哈希不能证明用户实际观看，也不能自动核对教学语义。写稿与人工观看仍须遵守协议。
 
 ## 闸门总表
 
@@ -49,8 +50,8 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 | G1 | 讲稿风格 | 写完整讲稿前（可与覆盖度清单同轮） | 风格选项（见下） | 用户选定一种风格 | 按该风格写 `讲稿.md` |
 | G2 | 讲稿内容 | `讲稿.md` 自检完成后 | 完整讲稿 + 自检勾选结果 + 覆盖度清单 | 用户明确说「讲稿确认 / 可以画」 | 写 `make_boards.py`、出图 |
 | G3 | TTS 语音 | 讲稿确认后、跑 TTS 前 | 后端 + 音色 + 语速选项；可选试听一句 | 用户选定 voice（与可选 rate） | `build_narration*` / `build_voice` |
-| G4 | 冒烟一拍 | 全量渲染前 | `--only` 一拍 + 抽帧图 | 用户说「可以全量」或指出修改 | 全量渲染 |
-| G5 | 最终成片 | 全量渲染和技术质检后 | 完整视频 + 质检结果 + 已知问题 | 用户确认当前版本「成片通过 / 可以交付」，或明确豁免 | 标记交付完成 |
+| G4 | 冒烟一拍 | 全量渲染前 | 单拍、两张抽帧与 sample.json | 用户确认并交互录入当前回执 | 同方案全量渲染 |
+| G5 | 最终成片 | 全量渲染和技术质检后 | 完整视频、render.json 与已知问题 | 必要检查通过，用户确认或明确豁免后交互录入 | 标记交付完成 |
 
 系列量产时：**每一集**都过 G2→G5；G0/G1 可在系列开头确认一次，换风格或换音色时重开。
 
@@ -180,10 +181,10 @@ python scripts/gen_tts.py preview.yaml --preview --out-dir preview_audio
 
 ```bash
 python scripts/render_explainer.py plan.json --out out/<name>.mp4 --only s01
-# 抽 1～2 帧给人看
+# CLI 自动生成样片、两张抽帧与 sample.json
 ```
 
-请用户看抽帧：cue 顺序、有无提前画出未讲元素。通过后再全量渲染。
+请用户看样片与抽帧：cue 顺序、有无提前画出未讲元素。用户通过后交互录入该次 sample.json，才能按同一配置全量渲染。
 
 ---
 
@@ -191,7 +192,7 @@ python scripts/render_explainer.py plan.json --out out/<name>.mp4 --only s01
 
 全量渲染后，先完成技术质检，再送用户确认：
 
-1. 运行 `verify_media.py` 检查成片；提供实际时长、预期时长、检查结果和抽帧结果。检查失败时先修复；检查未执行时写明原因，不得称为通过。
+1. 用 `verify_media.py --manifest <render.json路径>` 检查当前全量回执；提供实际时长、预期时长和检查结果。检查失败时先修复；未执行的检查不得称为通过。
 2. 提供当前版本的完整视频路径或可播放链接，请用户完整观看。抽帧或 G4 单拍确认不能替代完整视频确认。
 3. 请用户检查：知识点有无漏讲、文字有无错字或缺字、发音是否正确、音量和停顿是否合适、绘制是否与旁白同步、开头结尾是否完整。
 4. 停下来等待确认。用户提出修改时，记录时间点或拍号，返回对应闸门；重做受影响产物并重新质检、提交 G5。技术检查失败不能用用户豁免改写成通过。
@@ -210,7 +211,7 @@ python scripts/render_explainer.py plan.json --out out/<name>.mp4 --only s01
 2. 修改成片 — 请提供时间点或拍号及问题；修改后重新提交确认。
 ```
 
-未获确认或明确豁免时，只能报告「成片已生成，等待 G5 确认」，不得报告整个制作任务已完成。
+未获确认或明确豁免时，只能报告「成片已生成，等待 G5 确认」。随后仍须由用户交互录入当前 render.json，不能用口头回复或说明文件替代技术证据。
 
 ---
 

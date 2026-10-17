@@ -16,7 +16,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from production import print_inspection, read_spec
+from production import print_design, print_inspection, read_spec
 from user_gates import require, require_spec
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -28,11 +28,15 @@ def main() -> int:
     ap.add_argument("--rate", help="须匹配 spec.rate（未指定时使用 spec.rate 或 +22%）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--preflight", action="store_true")
+    ap.add_argument("--design-only", action="store_true")
     args = ap.parse_args()
 
     spec_path = Path(args.spec).resolve()
     root = spec_path.parent
     spec = read_spec(spec_path)
+    if args.design_only:
+        print_design(spec)
+        return 0
 
     if args.dry_run or args.preflight:
         print_inspection(spec, root, "fast", args.rate, args.preflight)

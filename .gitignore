@@ -19,7 +19,11 @@ audio/
 boards/
 self_test_artifacts/
 .narration-cache/
+.video-cache/
+.render-runs/
+.*.mp4.lock
 .user-gates.json
+.user-gates.lock
 *.mp4
 *.mp3
 *.wav
