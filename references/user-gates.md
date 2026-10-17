@@ -23,7 +23,7 @@ python <skill>/scripts/user_gates.py --root . approve G2 --artifact 讲稿.md
 # 自定义 PIL 绘图也必须经此入口运行：
 python <skill>/scripts/user_gates.py --root . run boards -- python make_boards.py
 # G3 必须绑定实际配音输入；快速版 rate 写入 plan.build.json，并与 --rate 一致：
-python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json
+python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
 python <skill>/scripts/build_narration_fast.py plan.build.json
 python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4 --only s01
 # 用户看过单拍与抽帧后，同时绑定渲染计划、样片和抽帧：
@@ -34,11 +34,12 @@ python <skill>/scripts/user_gates.py --root . approve G5 --artifact out/video.mp
 python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 ```
 
-- 内建拦截：`gen_board_images.py` 要求 G2；`make_text_layer.py` 要求当前目录（或 `--project-root`）的 G2；两个 `build_narration` CLI 和 `gen_tts.py` 批量模式要求 G3 且绑定当前输入；渲染单拍要求 G3，全量要求 G4 且绑定当前 `plan.json`。共享 `build()` 也检查 G3 和实际输入内容，防止普通 wrapper 绕过缺失确认。
+- 内建拦截：`gen_board_images.py` 要求 G2；`make_text_layer.py` 要求当前目录（或 `--project-root`）的 G2；两个 `build_narration` CLI 和 `gen_tts.py` 批量模式要求 G3 且绑定当前输入与有效配置；渲染单拍要求 G3，全量要求 G4 且绑定当前 `plan.json`。共享 `build()` 也检查 G3 和实际输入内容。
+- G3 的 `--mode standard`、`--mode fast`、`--mode scene` 分别对应普通版、快速版和场景配音。旧 G3 没有有效配置快照时须重新确认。预检、缓存与配音清单操作见 [narration-workflow.md](narration-workflow.md)。
 - 审批 JSON 含场景 `image` / `audio` 时，同时记录引用文件的哈希。后续改变画板或音频也会使确认失效。
 - 支持 `--dry-run` 的入口在该模式下不要求确认。G3 前的单句探测用 `gen_tts.py preview.yaml --preview --out-dir <试听目录>`；YAML 只能有一条非空、至多 100 字的文本，且需 G2 和额外输入 `CONFIRM PREVIEW`。该授权不通过 G3；YAML 解析依赖 `requirements.txt` 中的 PyYAML。
 - 自定义 `build_voice.py`、外部 apiz 和其他制作程序必须用 `user_gates.py run tts -- <命令>` 包裹；自定义交付命令用 `run deliver`。只有受保护入口和该包装器执行拦截，直接调用外部工具不受控制。
-- 这不是安全沙箱。能改脚本或审批文件的人仍能绕过；哈希证明版本未变，不证明用户实际观看，也不替代技术质检。G0/G1 的写稿与 G5 的口头交付仍须 Agent 遵守协议。
+- 这不是安全沙箱。能改脚本或审批文件的人仍能绕过；哈希证明版本未变，不证明用户实际观看，也不替代技术质检。当前 G4/G5 尚未强制验证证据类型；写稿与最终交付仍须 Agent 遵守协议。
 
 ## 闸门总表
 

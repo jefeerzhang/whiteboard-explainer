@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 *.so
 .Python
+.mypy_cache/
 
 # venv
 .venv/
@@ -17,8 +18,11 @@ out/
 audio/
 boards/
 self_test_artifacts/
+.narration-cache/
+.user-gates.json
 *.mp4
 *.mp3
+*.wav
 *.lrc
 
 # 编辑器 / OS

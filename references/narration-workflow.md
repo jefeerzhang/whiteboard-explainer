@@ -1,0 +1,98 @@
+# 配音可靠性：已实现的任务 1–5
+
+本流程覆盖本地预检、媒体校验、G3 有效配置、旁白缓存和本次音轨/cue 归属。
+任务编号指十张任务草案中的 1–5，不是总规格中的工作包 W1–W5。
+不代表视频缓存、G4/G5 技术证据闭环或教学停顿已实现。完整制作仍遵守 [用户确认协议](user-gates.md)。
+
+## 1. 本地预检
+
+以下命令使用项目虚拟环境解释器运行。从单集目录调用时，将 `<skill>` 替换为 skill 的绝对路径。
+
+```bash
+python <skill>/scripts/build_narration.py plan.build.json --dry-run
+python <skill>/scripts/build_narration.py plan.build.json --preflight
+python <skill>/scripts/build_narration_fast.py plan.build.json --preflight
+python <skill>/scripts/gen_tts.py narration.json --preflight
+```
+
+- dry-run 验证输入与已存在的画板，输出有效配置；不创建音轨、计划或审批，不联网。运行依赖状态为 `NOTRUN`。
+- preflight 额外检查本地 ffmpeg、ffprobe、libx264 与所选 TTS SDK；不调用真实配音，不验证远端连通性。
+- 输入须为对象，拍号唯一且不含路径分隔符，box 坐标合法，时长与间隔有限，画板可读取。
+- 指定 `font` 时检查字体文件能否加载；这不证明所有汉字、符号和公式字形都完整。
+- JSON 无额外解析器依赖；YAML 输入需要依赖清单中的 PyYAML。不会自动安装缺少的包。
+- 当前内置入口支持 `edge` / `edge-tts`。不自动切换供应商，也不将失败改记为成功。
+
+## 2. G3 确认实际配置
+
+G0–G2 按既有协议完成后，再由用户交互录入 G3。审批前展示有效音色、语速、SDK 版本和处理配置。
+
+```bash
+# 普通版
+python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode standard
+python <skill>/scripts/build_narration.py plan.build.json
+
+# 快速版：须单独确认；默认 +22%，且裁首尾静音
+python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
+python <skill>/scripts/build_narration_fast.py plan.build.json
+
+# 按 scene.text 配音
+python <skill>/scripts/user_gates.py --root . approve G3 --artifact narration.json --mode scene
+python <skill>/scripts/gen_tts.py narration.json --out-dir audio/narration
+```
+
+- 普通版缺省 `rate` 为 `+0%`，快速版为 `+22%`；输入显式 `rate` 优先。快速版 `--rate` 必须匹配已确认输入。
+- 场景配音支持原有 `speed`；未写 `rate` 时折算为百分比。有效值会在预检与审批时展示。
+- 改稿、换声、改语速或切换处理配置后，须重新确认 G3。旧版没有有效配置快照的 G3 会被拒绝，不能自动补签。
+- region 的 `annotation`、scene 的 `text` 保留画面原文。可用 `spoken_text` 明确指定实际口播；缓存按实际提交文本判定。
+- 单句 `--preview` 仍要求 G2 和额外交互授权，最多一条、100 字，按实际 `spoken_text` 检查；试听不通过 G3。
+- 本轮可靠性保证限于上述内置 CLI。外部 apiz 命令和自定义 monkey-patch 后端不自动获得相同缓存与配置契约。
+
+## 3. 缓存与运行清单
+
+- 原始旁白按实际文本、后端、模型、音色、语速、SDK 与契约版本计算内容指纹。
+- 原始合成与裁静音/格式转换分开；仅改变间隔或处理配置时，可以复用相同原始旁白。
+- 命中须满足版本、内容指纹、文件哈希和本地完整解码。无元数据、损坏或旧版同名缓存不被信任。
+- 旧的 `audio/narration/parts/` 不会自动删除，也不会只因文件同名就复用。
+- 共享旁白缓存位于单集目录的 `.narration-cache/`。
+- 加工音轨使用 WAV，避免以 MP3 编码填充估算 cue；音轨、cue 和计划归单次运行所有。
+- 每次运行在输出目录的 `runs/<配置指纹>/<运行编号>/` 下保存独立产物；不会用新结果覆盖上一运行的音轨。
+- 同一项目的配音生产使用本地文件锁。另一个生产者已占用时直接拒绝，避免并发覆写当前计划或重复请求。
+- 完成前重新核对输入与画板指纹。中途修改或失败时清单为 `FAIL`，原来的当前计划保持不变。
+
+`build_narration*` 成功后仍输出根目录 `plan.json`，供现有渲染入口使用：
+
+- `scenes[].audio` 指向本次运行的实际音轨。
+- `narration.manifest` 指向本次运行清单；`generated` / `reused` 是本次真实合成和复用次数。
+- 清单记录输入与实现指纹、实际音轨及哈希、cue、期望时长和解码结果。
+- 运行目录另存可独立解析相对素材路径的计划快照。
+- 当前旁白与 cue 通过已处理的 PCM 音轨计算；本轮没有新增教学 hold 或视频帧锁功能。
+
+`gen_tts` 在输出目录保留 `timeline.json` 入口；其中的音轨和清单路径相对于输入项目目录。
+每次运行另存自己的 timeline 快照，CLI 输出对应清单与缓存事实。
+输入文件不得与生成的 `plan.json` 或 `timeline.json` 重名冲突。
+
+## 4. 独立媒体校验
+
+```bash
+python <skill>/scripts/verify_media.py --file audio.wav --kind audio --expect 3.5
+python <skill>/scripts/verify_media.py --manifest <本次运行清单>
+python <skill>/scripts/verify_media.py --file audio.wav --metadata-only
+```
+
+- 使用本地 ffprobe 读取流与有限正时长，使用 ffmpeg 完整解码；不依赖仓库外的辅助 skill。
+- `--metadata-only` 明确显示 `decode=NOTRUN`，不能当作完整解码验收。
+- 原有数组式 manifest 仍支持；相对路径以 manifest 所在目录解析。
+- 版本化配音清单必须为完成状态，计划和音轨哈希必须匹配。不猜测最近目录或同名旧文件。
+- `--expect` 必须为有限正数。当前默认时长容差保持原有的 0.75 秒。
+- 该工具检查媒体与配音证据，不代表 G4 样片、G5 人工观看或实际中文发音已通过。
+
+## 5. 开发验证
+
+默认测试不请求真实 TTS、不渲染视频。使用可计数的 SDK 替身生成短 PCM 夹具，并经本地 ffmpeg/ffprobe 验证真实编解码路径。
+不将这些夹具检查报告为真实中文旁白或完整出片验证。
+
+```bash
+python -m unittest discover -s scripts -p "test_*.py" -v
+```
+
+关键行为由 CLI 回归覆盖：连续改稿只重配受影响片段、换声失效、raw/加工分离、旧缓存保留、损坏缓存拒绝、失败不替换计划、间隔更新 cue 和生产者冲突。

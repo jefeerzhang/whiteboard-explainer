@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+
+from artifacts import atomic_json, file_digest
+from production import narration_config, read_document
 
 
 STATE_FILE = ".user-gates.json"
@@ -19,12 +21,7 @@ class GateError(SystemExit):
     pass
 
 
-def digest(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+digest = file_digest
 
 
 def load(root: Path) -> dict:
@@ -59,7 +56,7 @@ def require(root: Path, gate: str, artifact: Path | None = None) -> None:
             raise GateError(f"BLOCKED: {gate} does not approve this input: {filename}")
 
 
-def approve(root: Path, gate: str, artifacts: list[Path]) -> None:
+def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard") -> None:
     root = root.resolve()
     index = GATES.index(gate)
     if index:
@@ -67,11 +64,14 @@ def approve(root: Path, gate: str, artifacts: list[Path]) -> None:
     if not artifacts:
         raise GateError("BLOCKED: at least one artifact is required")
     files = {p.resolve() for p in artifacts}
+    narration = {}
     # Bind referenced boards/audio too, not just the JSON pointing at them.
     for path in list(files):
-        if path.suffix.lower() == ".json":
-            content = json.loads(path.read_text(encoding="utf-8"))
+        if path.suffix.lower() in (".json", ".yaml", ".yml"):
+            content = read_document(path)
             if isinstance(content, dict):
+                if gate == "G3" and "scenes" in content:
+                    narration[str(path)] = narration_config(content, mode)
                 for scene in content.get("scenes", []):
                     for key in ("image", "audio"):
                         if scene.get(key):
@@ -80,6 +80,8 @@ def approve(root: Path, gate: str, artifacts: list[Path]) -> None:
     print(f"Approve {gate} for these exact files:")
     for filename in hashes:
         print(f"  {filename}")
+    if narration:
+        print("Effective narration: " + json.dumps(narration, ensure_ascii=True))
     try:
         answer = input(f"After reviewing them, type CONFIRM {gate}: ")
     except EOFError:
@@ -96,10 +98,9 @@ def approve(root: Path, gate: str, artifacts: list[Path]) -> None:
         data.pop(name, None)
     data[gate] = {"artifacts": hashes,
                   "confirmed_at": datetime.now(timezone.utc).isoformat()}
-    path = root / STATE_FILE
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    if gate == "G3":
+        data[gate]["narration"] = narration
+    atomic_json(root / STATE_FILE, data)
     print(f"Recorded {gate}; downstream approvals cleared.")
 
 
@@ -115,13 +116,18 @@ def confirm_preview(root: Path, texts: list[str]) -> None:
         raise GateError("BLOCKED: preview cancelled")
 
 
-def require_spec(root: Path, spec: dict) -> None:
+def require_spec(root: Path, spec: dict, mode: str = "standard",
+                 rate: str | None = None) -> Path:
     require(root, "G3")
-    for filename in load(root.resolve())["G3"]["artifacts"]:
+    record = load(root.resolve())["G3"]
+    for filename in record["artifacts"]:
         path = Path(filename)
-        if path.suffix.lower() == ".json":
-            if json.loads(path.read_text(encoding="utf-8")) == spec:
-                return
+        if path.suffix.lower() in (".json", ".yaml", ".yml") and read_document(path) == spec:
+            snapshot = record.get("narration")
+            if (isinstance(snapshot, dict)
+                    and snapshot.get(filename) == narration_config(spec, mode, rate)):
+                return path
+            raise GateError("BLOCKED: G3 effective configuration differs or is missing; reapprove G3")
     raise GateError("BLOCKED: G3 does not approve this narration spec")
 
 
@@ -133,6 +139,8 @@ def main() -> int:
     approval = sub.add_parser("approve")
     approval.add_argument("gate", choices=GATES)
     approval.add_argument("--artifact", type=Path, action="append", required=True)
+    approval.add_argument("--mode", choices=["standard", "fast", "scene"], default="standard",
+                          help="G3 使用的配音入口；会展示实际音色、语速及处理配置")
     check = sub.add_parser("check")
     check.add_argument("gate", choices=GATES)
     check.add_argument("--artifact", type=Path)
@@ -141,7 +149,7 @@ def main() -> int:
     run.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.operation == "approve":
-        approve(args.root, args.gate, args.artifact)
+        approve(args.root, args.gate, args.artifact, args.mode)
     elif args.operation == "check":
         require(args.root, args.gate, args.artifact)
         print(f"PASS: {args.gate}")

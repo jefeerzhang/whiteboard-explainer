@@ -32,37 +32,18 @@
 | 9 | 质检 + 冒烟(G4) | `check_assignment.py plan.json` 归属清零 → 渲一拍抽帧 → **停**等用户说可以全量 → 全量渲染 |
 | 10 | 最终成片确认(G5) | 技术质检后提交完整视频、检查结果和已知问题;按 `user-gates.md` **停**等用户确认当前版本,再标记交付完成 |
 
-## 语速与静音裁剪 wrapper(build_with_rate.py)
+## 语速与静音裁剪
 
-不改 skill 本体,monkey-patch 模块级 `tts`;裁静音用 silenceremove+areverse 双程,保留 0.08s 垫:
+使用内置快速版入口，不再用 monkey-patch 隐式覆盖已确认语速。把用户选定的 `rate` 和 `voice` 写入输入，再检查并确认有效配置：
 
-```python
-import asyncio, json, subprocess, sys
-from pathlib import Path
-SKILL = Path(__file__).resolve().parent  # 按项目位置调整
-sys.path.insert(0, SKILL)
-import build_narration as bn
-
-_orig = bn.tts
-TRIM = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.08,"
-        "areverse,"
-        "silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.08,"
-        "areverse")
-
-async def tts_fast(text, out, voice, rate="+0%"):
-    await _orig(text, out, voice, rate="+22%")
-    tmp = out.with_suffix(".trim.mp3")
-    subprocess.run(["ffmpeg", "-y", "-i", str(out), "-af", TRIM,
-                    "-c:a", "libmp3lame", "-q:a", "2", str(tmp)],
-                   check=True, capture_output=True, encoding="utf-8", errors="replace")
-    tmp.replace(out)
-
-bn.tts = tts_fast
-spec = json.loads((Path(__file__).resolve().parent / "plan.build.json").read_text(encoding="utf-8"))
-asyncio.run(bn.build(spec, Path(__file__).resolve().parent, dry=False))
+```bash
+python scripts/build_narration_fast.py plan.build.json --preflight
+python scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
+python scripts/build_narration_fast.py plan.build.json
 ```
 
-经验值:Yunxi/Xiaoxiao 在 +22% 时仍清晰;+15% 偏稳;旁白中文 ~4.5~5 字/秒(含裁剪后)。TTS 分片自带头尾静音约 0.3~0.6s,不裁剪会白白拉长 20% 时长。**改语速后必须删除旧分片重生成**,并 `--force` 重渲。**实际 rate/voice 以用户在 G3 的选择为准**,上表 `+22%` 仅在用户选推荐语速时使用。
+快速版在加工音频时裁首尾静音，原始合成按实际语速单独缓存。改语速后重新确认 G3，由内容指纹决定重配，无须删除旧分片。
+视频缓存尚未改造；视频强制重渲仍需通过 G4 并显式选择 `--force`。详细迁移与运行清单见 [narration-workflow.md](narration-workflow.md)。
 
 ## 讲稿自检清单(附在 讲稿.md 末尾)
 

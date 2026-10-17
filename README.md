@@ -158,7 +158,7 @@ whiteboard-explainer/
 | `onnxruntime` | pip 包 | ✅ | PyPI |
 | `edge-tts` | pip 包 | 可选 | PyPI；**本机已被微软 403 封锁，请改用 apiz**（见下） |
 | `Pillow` / `numpy` | pip 包 | ✅ | PyPI |
-| `ffmpeg` | 系统二进制 | ✅ | 需支持 **libx264**；`ffprobe` 可选（缺了会退回 ffmpeg 解析时长） |
+| `ffmpeg` / `ffprobe` | 系统二进制 | ✅ | 内置配音与校验需要两者；ffmpeg 须支持 **libx264** |
 | `AGNES_API_KEY` | Agnes API 凭证 | 可选 | `.env` 或环境变量 |
 
 `.env` 寻找顺序：cwd → 父目录 → `~/.env` → `~/.workbuddy/.env`，找不到则硬报错（不会静默失败）。
@@ -167,10 +167,10 @@ whiteboard-explainer/
 
 ### 旁白：edge-tts 被封时的替代方案（apiz）
 
-**先自检 edge-tts 是否还可用**——它经常被微软按 IP/地区封锁：
+**先获准再测试 edge-tts 是否可用**。G2 后准备单句 `preview.json`，按 G3 单独授权试听：
 
 ```bash
-python scripts/gen_tts.py "测试一句" --out /tmp/probe.mp3
+python scripts/gen_tts.py preview.json --preview --out-dir preview_audio
 # 报 WSServerHandshakeError 403 → 已被封锁，走下面的 apiz 方案
 ```
 

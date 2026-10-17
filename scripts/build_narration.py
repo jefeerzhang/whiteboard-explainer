@@ -10,26 +10,22 @@
 用法：
   python scripts/build_narration.py plan.build.json
   python scripts/build_narration.py plan.build.json --dry-run
-输出：audio/narration/<sid>.mp3 + plan.json（含 regions 的精确 start/end）
+输出：独立运行目录内的 WAV、cue 与 manifest，以及兼容的 plan.json。
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import copy
 import subprocess
 import sys
 from pathlib import Path
 
+from artifacts import atomic_json, file_lock
+from narration_cache import get_audio
+from narration_runs import NarrationRun, relative
+from production import inspection_report, narration_config, print_inspection, read_spec, spoken_text
 from user_gates import require, require_spec
-
-try:
-    import edge_tts
-except ImportError:
-    sys.exit("缺少 edge-tts：pip install edge-tts")
-
-GAP_FILE = ".gap.mp3"
-
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, check=True, capture_output=True,
@@ -44,6 +40,8 @@ def probe_duration(path: Path) -> float:
 
 async def tts(text: str, out: Path, voice: str, rate: str = "+0%") -> None:
     """edge-tts 偶发 NoAudioReceived/网络抖动，重试 3 次。"""
+    import edge_tts
+
     last = None
     for attempt in range(3):
         try:
@@ -59,31 +57,46 @@ async def tts(text: str, out: Path, voice: str, rate: str = "+0%") -> None:
 
 
 def make_gap(out_dir: Path, seconds: float) -> Path:
-    gap = out_dir / GAP_FILE
+    gap = out_dir / ".gap.wav"
     if not gap.exists():
         run(["ffmpeg", "-y", "-f", "lavfi", "-i",
              f"anullsrc=r=24000:cl=mono", "-t", f"{seconds}",
-             "-c:a", "libmp3lame", "-q:a", "9", str(gap)])
+             "-c:a", "pcm_s16le", str(gap)])
     return gap
 
 
 def concat(parts: list[Path], out: Path) -> None:
     lst = out.parent / (out.name + ".concat.txt")
-    lst.write_text("".join(f"file '{p.resolve().as_posix()}'\n" for p in parts), encoding="utf-8")
+    escaped = [p.resolve().as_posix().replace("'", "'\\''") for p in parts]
+    lst.write_text("".join(f"file '{p}'\n" for p in escaped), encoding="utf-8")
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
-         "-c:a", "libmp3lame", "-q:a", "2", str(out)])
+         "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(out)])
     lst.unlink()
 
 
-async def build(spec: dict, root: Path, dry: bool) -> dict:
-    if not dry:
-        require_spec(root, spec)
-    voice = spec.get("voice", "zh-CN-YunxiNeural")
+async def build(spec: dict, root: Path, dry: bool, mode: str = "standard",
+                rate: str | None = None) -> dict:
+    source = require_spec(root, spec, mode, rate) if not dry else None
+    inspection_report(spec, root, mode, rate, runtime=not dry)
+    config = narration_config(spec, mode, rate)
+    if dry:
+        return {"config": config, "scenes": spec["scenes"]}
+    assert source is not None
+    if source.resolve() == (root / "plan.json").resolve():
+        raise ValueError("Use a separate build input; plan.json is the generated render plan")
+    with file_lock(root / ".narration-cache" / "production.lock"):
+        current = NarrationRun(root, spec, config, source)
+        try:
+            return await _build_run(spec, root, config, current)
+        except BaseException:
+            current.fail()
+            raise
+
+
+async def _build_run(spec: dict, root: Path, config: dict, current: NarrationRun) -> dict:
     gap = float(spec.get("gap", 0.35))
-    audio_dir = root / spec.get("audio_dir", "audio/narration")
-    parts_dir = audio_dir / "parts"
-    parts_dir.mkdir(parents=True, exist_ok=True)
-    gap_path = make_gap(parts_dir, gap)
+    audio_dir = current.directory
+    gap_path = make_gap(audio_dir, gap) if gap else None
 
     plan = {
         "idea": spec.get("idea", ""),
@@ -94,34 +107,34 @@ async def build(spec: dict, root: Path, dry: bool) -> dict:
     for scene in spec["scenes"]:
         sid = scene["id"]
         regions = scene.get("regions") or []
-        annotations = [r.get("annotation", "").strip() for r in regions]
+        annotations = [spoken_text(r) for r in regions]
         # 无 annotation 的 region（纯图形）也要有窗口：用空串 TTS 会失败，改为复用时长 0
         spoken = [(i, a) for i, a in enumerate(annotations) if a]
 
-        scene_audio = audio_dir / f"{sid}.mp3"
+        scene_audio = audio_dir / f"{sid}.wav"
         windows: dict[int, tuple[float, float]] = {}
+        scene_facts = []
 
-        if not dry:
+        if spoken:
             # 1. 逐子句 TTS
             clips: list[tuple[int, Path, float]] = []
             for k, (idx, text) in enumerate(spoken):
-                clip = parts_dir / f"{sid}_r{k:02d}.mp3"
-                if not clip.exists():
-                    await tts(text, clip, voice)
-                    print(f"  TTS {sid} r{k:02d}: {text[:18]}…")
-                clips.append((idx, clip, probe_duration(clip)))
+                clip, duration, facts = await get_audio(text, config, root / ".narration-cache", tts)
+                print(f"  TTS {sid} r{k:02d}: generated={facts['generated']} reused={facts['reused']}")
+                scene_facts.append(facts)
+                clips.append((idx, clip, duration))
             # 2. 累积时间窗：region i 的窗口 = 它自己分片起点 → 下一个分片结束（含尾部 gap）
             cursor = 0.0
             for j, (idx, clip, dur) in enumerate(clips):
                 start = cursor
-                end = cursor + dur + (gap if j < len(clips) - 1 else gap)
+                end = cursor + dur + (gap if j < len(clips) - 1 else 0)
                 windows[idx] = (round(start, 3), round(end, 3))
                 cursor = end
             # 3. 拼接整拍音轨（分片 + 间隔）
             parts: list[Path] = []
             for j, (idx, clip, dur) in enumerate(clips):
                 parts.append(clip)
-                if j < len(clips) - 1:
+                if j < len(clips) - 1 and gap_path:
                     parts.append(gap_path)
             if parts:
                 concat(parts, scene_audio)
@@ -132,13 +145,17 @@ async def build(spec: dict, root: Path, dry: bool) -> dict:
 
         out_scene = {"id": sid, "image": scene["image"]}
         if windows:
-            out_scene["audio"] = scene_audio.relative_to(root).as_posix()
+            out_scene["audio"] = relative(scene_audio, root)
         elif scene.get("duration"):
             out_scene["duration"] = scene["duration"]
 
         out_regions = []
         for i, r in enumerate(regions):
-            entry = {"label": r.get("label", f"r{i}"), "box": r["box"]}
+            entry = {"label": r.get("label", f"r{i}"), "box": r.get("box", r.get("box_2d"))}
+            if "annotation" in r:
+                entry["annotation"] = r["annotation"]
+            if "spoken_text" in r:
+                entry["spoken_text"] = r["spoken_text"]
             if i in windows:
                 s, e = windows[i]
                 entry["start"], entry["end"] = s, e
@@ -147,11 +164,18 @@ async def build(spec: dict, root: Path, dry: bool) -> dict:
             out_regions.append(entry)
         out_scene["regions"] = out_regions
         plan["scenes"].append(out_scene)
+        current.record(sid, scene_audio if windows else None, out_regions, scene_facts)
         total = sum(e - s for s, e in windows.values()) if windows else scene.get("duration", 0)
         print(f"{sid}: {len(regions)} regions, cue 总时长 {total:.1f}s")
 
     out_path = root / "plan.json"
-    out_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    archived = copy.deepcopy(plan)
+    for scene in archived["scenes"]:
+        scene["image"] = relative(root / scene["image"], current.directory)
+        if scene.get("audio"):
+            scene["audio"] = relative(root / scene["audio"], current.directory)
+    plan["narration"] = current.complete(archived)
+    atomic_json(out_path, plan)
     print(f"写出 {out_path}")
     return plan
 
@@ -160,18 +184,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("spec", help="plan.build.json")
     ap.add_argument("--dry-run", action="store_true", help="只打印子句，不 TTS")
+    ap.add_argument("--preflight", action="store_true", help="仅检查本地输入和运行依赖")
     args = ap.parse_args()
 
     spec_path = Path(args.spec).resolve()
     root = spec_path.parent
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec = read_spec(spec_path)
 
-    if args.dry_run:
-        for s in spec["scenes"]:
-            print(f"{s['id']}:")
-            for r in s.get("regions", []):
-                mark = "*" if r.get("annotation") else " "
-                print(f"  {mark} {r.get('label','')}: {r.get('annotation','')}")
+    if args.dry_run or args.preflight:
+        print_inspection(spec, root, runtime=args.preflight)
         return 0
 
     require(root, "G3", spec_path)
