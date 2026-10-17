@@ -10,12 +10,15 @@ import sys
 import tempfile
 import unittest
 import wave
+import copy
+import os
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
-from artifacts import fingerprint
+from artifacts import file_digest, fingerprint
 
 
 class VideoTests(unittest.TestCase):
@@ -312,6 +315,169 @@ class VideoTests(unittest.TestCase):
         receipts = list((self.root / ".render-runs").rglob("sample.json"))
         self.assertEqual(len(receipts), 1)
         self.assertEqual(json.loads(receipts[0].read_text())["status"], "FAIL")
+
+    def test_failed_pass_receipt_write_is_retried_only_as_fail(self):
+        replace = os.replace
+        denied = []
+
+        def reject_pass_receipt(source, target):
+            if (Path(target).name == "sample.json" and not denied
+                    and json.loads(Path(source).read_text())["status"] == "PASS"):
+                denied.append(True)
+                raise PermissionError("PASS receipt publication denied")
+            return replace(source, target)
+
+        with patch("artifacts.os.replace", side_effect=reject_pass_receipt):
+            code, output = self.invoke("--only", "s01")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(denied, [True])
+        self.assertEqual(self.report(output)["stage"], "VERIFY")
+        receipts = list((self.root / ".render-runs").rglob("sample.json"))
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(json.loads(receipts[0].read_text())["status"], "FAIL")
+        from render_contract import validate_evidence
+        with self.assertRaises(ValueError):
+            validate_evidence(receipts[0], "sample")
+
+    def test_media_duration_and_frame_failures_keep_stage_and_check_states(self):
+        renderer = importlib.import_module("render_explainer")
+        contract = importlib.import_module("render_contract")
+        verify = contract.verify_video
+        run = renderer.run
+
+        def wrong_duration(*args, **kwargs):
+            return {**verify(*args, **kwargs), "duration": 100}
+
+        def bad_frame(command):
+            if "-frames:v" in command:
+                raise RuntimeError("frame extraction failed")
+            return run(command)
+
+        for case, replacement, media_state, duration_state in (
+            ("media", patch.object(contract, "verify_video", side_effect=ValueError("decode failed")), "FAIL", "NOTRUN"),
+            ("duration", patch.object(contract, "verify_video", side_effect=wrong_duration), "PASS", "FAIL"),
+            ("frame", patch.object(renderer, "run", side_effect=bad_frame), "PASS", "PASS"),
+        ):
+            with self.subTest(case=case):
+                before = set((self.root / ".render-runs").rglob("sample.json"))
+                with replacement:
+                    code, output = self.invoke("--only", "s01")
+                report = self.report(output)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(report["stage"], "VERIFY")
+                self.assertEqual(report["checks"]["render"], "PASS")
+                self.assertEqual(report["checks"]["media"], media_state)
+                self.assertEqual(report["checks"]["duration"], duration_state)
+                receipts = set((self.root / ".render-runs").rglob("sample.json")) - before
+                self.assertEqual(len(receipts), 1)
+                proof = json.loads(receipts.pop().read_text())
+                self.assertEqual(proof["status"], "FAIL")
+                self.assertEqual(proof["checks"], report["checks"])
+
+    def test_assignment_exception_stops_in_preflight(self):
+        renderer = importlib.import_module("render_explainer")
+        with patch.object(renderer, "audit", side_effect=ValueError("assignment failed")):
+            code, output = self.invoke("--only", "s01")
+        report = self.report(output)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(report["stage"], "PREFLIGHT")
+        self.assertEqual(report["checks"]["assignment"], "FAIL")
+        self.assertEqual(report["checks"]["render"], "NOTRUN")
+        self.assertEqual(self.calls, [])
+
+    def test_delivery_publication_failure_keeps_previous_output_and_fail_receipt(self):
+        sample = self.report(self.render("--only", "s01"))
+        self.approve("G4", Path(sample["receipt"]))
+        final = self.report(self.render())
+        target = Path(final["output"])
+        original = target.read_bytes()
+        before = set((self.root / ".render-runs").rglob("render.json"))
+        replace = os.replace
+
+        def reject_delivery(source, destination):
+            if Path(destination).resolve() == target.resolve():
+                raise PermissionError("delivery publication denied")
+            return replace(source, destination)
+
+        with patch("artifacts.os.replace", side_effect=reject_delivery):
+            code, output = self.invoke("--force")
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.report(output)["stage"], "VERIFY")
+        self.assertEqual(target.read_bytes(), original)
+        receipts = set((self.root / ".render-runs").rglob("render.json")) - before
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(json.loads(receipts.pop().read_text())["status"], "FAIL")
+
+    def test_receipt_consumers_reject_check_and_artifact_contract_changes(self):
+        import user_gates
+        sample = self.report(self.render("--only", "s01"))
+        receipt = Path(sample["receipt"])
+        original = json.loads(receipt.read_text())
+        mutations = []
+        for name, state in (("media", "NOTRUN"), ("cue", "PASS")):
+            proof = copy.deepcopy(original)
+            proof["checks"][name] = state
+            mutations.append(proof)
+        proof = copy.deepcopy(original)
+        proof["artifacts"].pop()
+        mutations.append(proof)
+        proof = copy.deepcopy(original)
+        proof["artifacts"][-1] = dict(proof["artifacts"][-2])
+        mutations.append(proof)
+        proof = copy.deepcopy(original)
+        proof["artifacts"][-1]["role"] = "delivery"
+        mutations.append(proof)
+        for index, proof in enumerate(mutations):
+            with self.subTest(index=index):
+                receipt.write_text(json.dumps(proof), encoding="utf-8")
+                verified = subprocess.run(
+                    [sys.executable, str(Path(__file__).with_name("verify_media.py")),
+                     "--manifest", str(receipt)], capture_output=True, text=True,
+                )
+                self.assertNotEqual(verified.returncode, 0)
+                with self.assertRaises(user_gates.GateError):
+                    self.approve("G4", receipt)
+
+    def test_receipt_writer_rejects_missing_or_duplicate_frames(self):
+        from render_contract import RenderReceipt, check_snapshot
+        sample = self.report(self.render("--only", "s01"))
+        path = Path(sample["receipt"])
+        proof = json.loads(path.read_text())
+        context = proof["context"]
+        frame = path.parent / next(a["path"] for a in proof["artifacts"] if a["role"] == "frame")
+        for frames in ([frame], [frame, frame]):
+            with self.subTest(frames=frames):
+                receipt = RenderReceipt()
+                with receipt.check("inputs"):
+                    check_snapshot(context)
+                receipt.bind(context)
+                receipt.assignment({"state": "SKIP"})
+                with self.assertRaises(ValueError):
+                    with receipt.run(self.root, only="s01") as workspace:
+                        with receipt.check("render"):
+                            movie = workspace / "video.mp4"
+                            shutil.copyfile(sample["output"], movie)
+                        receipt.video(movie)
+                        receipt.complete(frames=frames)
+                self.assertEqual(json.loads((workspace / "sample.json").read_text())["status"], "FAIL")
+
+    def test_receipt_verification_decodes_media_after_matching_hash_update(self):
+        import user_gates
+        sample = self.report(self.render("--only", "s01"))
+        receipt = Path(sample["receipt"])
+        proof = json.loads(receipt.read_text())
+        video = next(a for a in proof["artifacts"] if a["role"] == "sample")
+        target = receipt.parent / video["path"]
+        target.write_bytes(b"not a decodable movie")
+        video["sha256"] = file_digest(target)
+        receipt.write_text(json.dumps(proof), encoding="utf-8")
+        verified = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("verify_media.py")),
+             "--manifest", str(receipt)], capture_output=True, text=True,
+        )
+        self.assertNotEqual(verified.returncode, 0)
+        with self.assertRaises(user_gates.GateError):
+            self.approve("G4", receipt)
 
     def test_new_g3_cannot_render_native_audio_from_the_previous_configuration(self):
         source = self.root / "plan.build.json"

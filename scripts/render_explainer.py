@@ -25,13 +25,12 @@ import re
 import subprocess
 import sys
 import tempfile
-import uuid
 from pathlib import Path
 
-from artifacts import atomic_bytes, atomic_json, file_digest, file_lock, relative
+from artifacts import atomic_bytes, atomic_json, file_digest, file_lock
 from check_assignment import audit
 from production import board_canvas, board_image
-from render_contract import CueError, QUALITY, check_snapshot, frame_duration, render_config, scene_key, snapshot, verify_video
+from render_contract import QUALITY, RenderReceipt, frame_duration, render_config, scene_key, snapshot, verify_video
 from user_gates import GateError, require, require_render, require_teaching, require_narration
 
 import numpy as np
@@ -365,11 +364,7 @@ def concatenate(parts: list[Path], output: Path) -> None:
             concat_list.unlink()
 
 
-def artifact(role: str, path: Path, base: Path) -> dict:
-    return {"role": role, "path": relative(path, base), "sha256": file_digest(path)}
-
-
-def produce(args, checks: dict) -> dict:
+def produce(args, receipt: RenderReceipt) -> dict:
     plan_path = Path(args.plan).resolve()
     root = plan_path.parent
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
@@ -387,20 +382,18 @@ def produce(args, checks: dict) -> dict:
         canvas = board_canvas(root / plan["scenes"][0]["image"])
     config = render_config(args.quality, name,
                            args.fps if args.fps is not None else plan.get("fps"), canvas)
-    checks["inputs"] = "FAIL"
-    context = snapshot(plan_path, plan, config)
-    if not args.dry_run:
-        require_narration(root, context)
-    checks.update({"inputs": "PASS", "cue": "PASS" if any(
-        s["cue_mode"] == "exact" for s in context["scenes"]) else "SKIP"})
+    with receipt.check("inputs"):
+        context = snapshot(plan_path, plan, config)
+        if not args.dry_run:
+            require_narration(root, context)
+    receipt.bind(context)
     if args.dry_run:
-        return {"status": "PASS", "stage": "PREFLIGHT", "context": context, "checks": checks}
+        return {"status": "PASS", "stage": "PREFLIGHT", "context": context, "checks": receipt.checks}
     if not args.only:
         require_render(root, context["key"])
-    assignment = audit(plan, root, config["canvas"])
-    checks["assignment"] = assignment["state"]
-    if assignment["state"] == "FAIL":
-        raise ValueError(f"Unassigned components: {assignment['unassigned']}")
+    with receipt.check("assignment"):
+        assignment = audit(plan, root, config["canvas"])
+    receipt.assignment(assignment)
     scenes = [s for s in plan["scenes"] if not args.only or s["id"] == args.only]
     if not scenes:
         raise ValueError("--only does not match a scene")
@@ -411,57 +404,26 @@ def produce(args, checks: dict) -> dict:
     with file_lock(output.parent / f".{output.name}.lock", "render"):
         if not args.only and output.exists() and not args.force:
             raise ValueError("Output already exists; choose another output or explicitly use --force")
-        workspace = root / ".render-runs" / context["key"] / uuid.uuid4().hex
-        workspace.mkdir(parents=True, exist_ok=False)
-        stage = "sample" if args.only else "render"
-        receipt = workspace / f"{stage}.json"
-        proof: dict = {"schema": 1, "stage": stage, "status": "FAIL", "context": context,
-                 "scenes": [s["id"] for s in scenes], "checks": checks, "artifacts": [],
-                 "video_cache": {"generated": 0, "reused": 0}}
-        try:
-            checks["render"] = "FAIL"
-            parts = []
-            for scene in scenes:
-                facts: dict = {}
-                part, _ = render_scene(scene, root, root / ".video-cache", args.quality,
-                                       None, args.force, config, facts)
-                for field in ("generated", "reused"):
-                    proof["video_cache"][field] += facts[field]
-                parts.append(part)
-            movie = workspace / "video.mp4"
-            concatenate(parts, movie)
-            checks["render"] = "PASS"
-            checks["media"] = "FAIL"
-            result = verify_video(movie, config, context["audio"])
-            checks["media"] = "PASS"
-            checks["duration"] = "FAIL"
-            expected = sum(s["duration"] for s in context["scenes"] if s["id"] in proof["scenes"])
-            if abs(result["duration"] - expected) > 2 / config["fps"] + 0.05:
-                raise ValueError("Video duration differs from this run")
-            checks["duration"] = "PASS"
-            checks["inputs"] = "FAIL"
-            check_snapshot(context)
-            checks["inputs"] = "PASS"
-            proof["artifacts"].append(artifact("sample" if args.only else "video", movie, workspace))
+        with receipt.run(root, only=args.only) as workspace:
+            with receipt.check("render"):
+                parts = []
+                for scene in scenes:
+                    facts: dict = {}
+                    part, _ = render_scene(scene, root, root / ".video-cache", args.quality,
+                                           None, args.force, config, facts)
+                    receipt.cache(facts)
+                    parts.append(part)
+                movie = workspace / "video.mp4"
+                concatenate(parts, movie)
+            result = receipt.video(movie)
+            frames = []
             if args.only:
                 for index, fraction in enumerate((0.25, 0.8)):
                     frame = workspace / f"frame-{index}.png"
                     run(["ffmpeg", "-v", "error", "-nostdin", "-ss", str(result["duration"] * fraction),
                          "-i", str(movie), "-frames:v", "1", str(frame)])
-                    proof["artifacts"].append(artifact("frame", frame, workspace))
-                target = movie
-            else:
-                atomic_bytes(output, movie.read_bytes())
-                proof["artifacts"].append(artifact("delivery", output, workspace))
-                target = output
-            proof["status"] = "PASS"
-            atomic_json(receipt, proof)
-        except BaseException:
-            atomic_json(receipt, proof)
-            raise
-    return {"status": "PASS", "stage": stage, "receipt": str(receipt),
-            "output": str(target), "checks": checks, "video_cache": proof["video_cache"]}
-
+                    frames.append(frame)
+            return receipt.complete(frames=frames, output=None if args.only else output)
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="白板讲解动画渲染器")
@@ -476,18 +438,11 @@ def main() -> int:
                                    "非默认主题会走 lib/themed_render.py 成片后整体染色")
     args = ap.parse_args()
 
-    checks = {name: "NOTRUN" for name in ("inputs", "assignment", "cue", "render", "media", "duration")}
+    receipt = RenderReceipt()
     try:
-        report = produce(args, checks)
+        report = produce(args, receipt)
     except (Exception, GateError) as exc:
-        if isinstance(exc, CueError):
-            checks["cue"] = "FAIL"
-        if checks["inputs"] == "NOTRUN" and not isinstance(exc, GateError):
-            checks["inputs"] = "FAIL"
-        stage = ("PREFLIGHT" if checks["render"] == "NOTRUN" else
-                 "VERIFY" if checks["render"] == "PASS" else "RENDER")
-        report = {"status": "FAIL", "stage": stage,
-                  "checks": checks, "error": str(exc)}
+        report = receipt.failure(exc, blocked=isinstance(exc, GateError))
         print(str(exc), file=sys.stderr)
         log("REPORT " + json.dumps(report, ensure_ascii=True))
         return 1
