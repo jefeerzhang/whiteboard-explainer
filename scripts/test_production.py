@@ -11,6 +11,9 @@ import tempfile
 import unittest
 import wave
 import hashlib
+import asyncio
+import copy
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -81,10 +84,11 @@ class ProductionTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("font", result.stderr)
 
-    def approve(self, mode="standard"):
+    def approve(self, mode="standard", through="G3"):
         note = self.root / "review.md"
         note.write_text("fixture reviewed", encoding="utf-8")
-        for gate in ("G0", "G1", "G2", "G3"):
+        gates = ("G0", "G1", "G2", "G3")
+        for gate in gates[:gates.index(through) + 1]:
             artifact = self.path if gate == "G3" else note
             result = self.cli(
                 "user_gates.py", "--root", self.root, "approve", gate,
@@ -389,6 +393,163 @@ class ProductionTests(unittest.TestCase):
         result = self.cli("build_narration.py", self.path, "--dry-run")
         self.assertEqual(json.loads(result.stdout)["runtime"], "NOTRUN")
         self.assertFalse((self.root / ".narration-cache").exists())
+
+    def test_shared_batch_entry_points_require_approval_before_outputs(self):
+        import narration_production
+        from user_gates import GateError
+
+        output = self.root / "scene-output"
+        calls = [
+            lambda: narration_production.produce_regions(self.path),
+            lambda: narration_production.produce_regions(self.spec, self.root),
+            lambda: narration_production.produce_scenes(self.path, output=output),
+        ]
+        with patch("edge_tts.Communicate", side_effect=AssertionError("unexpected synthesis")):
+            for call in calls:
+                with self.subTest(call=call), self.assertRaises(GateError):
+                    asyncio.run(call())
+        self.assertFalse((self.root / ".narration-cache").exists())
+        self.assertFalse((self.root / "audio").exists())
+        self.assertFalse(output.exists())
+
+    def test_direct_build_keeps_dry_result_and_published_plan_shape(self):
+        from build_narration import build
+
+        with patch("edge_tts.Communicate", side_effect=AssertionError("unexpected synthesis")):
+            result = asyncio.run(build(self.spec, self.root, dry=True))
+        self.assertEqual(result["scenes"], self.spec["scenes"])
+        self.assertEqual(result["config"]["rate"], "+15%")
+        self.assertFalse((self.root / ".narration-cache").exists())
+        self.approve()
+        requests = []
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            result = asyncio.run(build(self.spec, self.root, dry=False))
+        self.assertEqual(result, json.loads((self.root / "plan.json").read_text()))
+        self.assertEqual(len(requests), 1)
+        self.assertIn("narration", result)
+        self.assertIn("start", result["scenes"][0]["regions"][0])
+
+    def test_preview_without_g3_reuses_raw_audio_in_later_batch(self):
+        self.spec["scenes"] = [{"id": "s01", "text": "preview text"}]
+        self.save()
+        self.approve("scene", through="G2")
+        state = self.root / ".user-gates.json"
+        approved = state.read_bytes()
+        preview_output = self.root / "preview"
+        batch_output = self.root / "batch"
+        requests = []
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)):
+            with patch("builtins.input", return_value="CONFIRM PREVIEW"):
+                text = self.run_narration("gen_tts", "--preview", "--out-dir", str(preview_output))
+            preview = json.loads(text.splitlines()[-1])
+            self.assertEqual(state.read_bytes(), approved)
+            self.assertNotIn("G3", json.loads(approved))
+            self.assertEqual(preview["generated"], 1)
+            self.approve("scene")
+            batch = json.loads(self.run_narration(
+                "gen_tts", "--out-dir", str(batch_output)).splitlines()[-1])
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(batch["generated"], 0)
+        self.assertEqual(batch["reused"], 1)
+        self.assertNotEqual(preview["manifest"], batch["manifest"])
+        for output, summary in ((preview_output, preview), (batch_output, batch)):
+            timeline = json.loads((output / "timeline.json").read_text())
+            manifest = self.root / summary["manifest"]
+            self.assertEqual(timeline[0]["manifest"], summary["manifest"])
+            report = json.loads(manifest.read_text())
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual((manifest.parent / report["artifact"]).name, "timeline.json")
+            self.assertTrue((self.root / timeline[0]["file"]).is_file())
+
+    def test_shared_preview_rejects_missing_g2_cancellation_and_long_text(self):
+        from narration_production import preview_sentence
+        from user_gates import GateError
+
+        output = self.root / "preview"
+        for case, through, answer, text in (
+            ("missing G2", "G1", "CONFIRM PREVIEW", "preview text"),
+            ("cancelled", "G2", "no", "preview text"),
+            ("too long", "G2", "CONFIRM PREVIEW", "x" * 101),
+        ):
+            with self.subTest(case=case):
+                self.spec["scenes"] = [{"id": "s01", "text": text}]
+                self.save()
+                self.approve("scene", through=through)
+                requests = []
+                with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)), \
+                        patch("builtins.input", return_value=answer), \
+                        contextlib.redirect_stdout(io.StringIO()), self.assertRaises(GateError):
+                    asyncio.run(preview_sentence(self.path, output=output))
+                self.assertEqual(requests, [])
+                self.assertFalse(output.exists())
+                self.assertFalse((self.root / ".narration-cache").exists())
+
+    def test_publish_failure_preserves_previous_output_and_records_failed_run(self):
+        region_spec = copy.deepcopy(self.spec)
+        for mode in ("standard", "fast", "scene", "preview"):
+            with self.subTest(mode=mode):
+                self.spec = copy.deepcopy(region_spec)
+                is_scene = mode in ("scene", "preview")
+                if is_scene:
+                    self.spec["scenes"] = [{"id": "s01", "text": f"old {mode}"}]
+                self.save()
+                self.approve("scene" if is_scene else mode,
+                             through="G2" if mode == "preview" else "G3")
+                script = "gen_tts" if is_scene else "build_narration_fast" if mode == "fast" else "build_narration"
+                output = self.root / mode
+                args = ["--out-dir", str(output)] if is_scene else []
+                if mode == "preview":
+                    args.append("--preview")
+                target = output / "timeline.json" if is_scene else self.root / "plan.json"
+                with patch("edge_tts.Communicate", side_effect=self.fake_tts([])), \
+                        patch("builtins.input", return_value="CONFIRM PREVIEW"):
+                    self.run_narration(script, *args)
+                    original = target.read_bytes()
+                    before = set(self.root.rglob("manifest.json"))
+                    if is_scene:
+                        self.spec["scenes"][0]["text"] = f"new {mode}"
+                    else:
+                        self.spec["scenes"][0]["regions"][0]["annotation"] = f"new {mode}"
+                    self.save()
+                    self.approve("scene" if is_scene else mode,
+                                 through="G2" if mode == "preview" else "G3")
+                    replace = os.replace
+
+                    def refuse_publication(source, destination):
+                        if Path(destination).resolve() == target.resolve():
+                            raise PermissionError("publication denied")
+                        return replace(source, destination)
+
+                    with patch("artifacts.os.replace", side_effect=refuse_publication), \
+                            self.assertRaisesRegex(PermissionError, "publication denied"):
+                        self.run_narration(script, *args)
+                self.assertEqual(target.read_bytes(), original)
+                failed = set(self.root.rglob("manifest.json")) - before
+                self.assertEqual(len(failed), 1)
+                self.assertEqual(json.loads(failed.pop().read_text())["status"], "FAIL")
+                self.assertEqual(list(target.parent.glob(f".{target.name}.*.tmp")), [])
+
+    def test_failed_failure_receipt_preserves_original_publication_error(self):
+        self.approve()
+        target = self.root / "plan.json"
+        replace = os.replace
+
+        def refuse_publication_and_failure_receipt(source, destination):
+            destination = Path(destination)
+            if destination.resolve() == target.resolve():
+                raise PermissionError("publication denied")
+            if destination.name == "manifest.json" and json.loads(Path(source).read_text())["status"] == "FAIL":
+                raise OSError("failure receipt denied")
+            return replace(source, destination)
+
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts([])), \
+                patch("artifacts.os.replace", side_effect=refuse_publication_and_failure_receipt), \
+                self.assertRaisesRegex(OSError, "failure receipt denied") as raised:
+            self.run_narration()
+        self.assertIsInstance(raised.exception.__context__, PermissionError)
+        self.assertEqual(str(raised.exception.__context__), "publication denied")
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

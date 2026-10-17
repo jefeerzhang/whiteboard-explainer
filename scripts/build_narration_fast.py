@@ -17,10 +17,7 @@ import sys
 from pathlib import Path
 
 from production import print_design, print_inspection, read_spec
-from user_gates import require, require_spec
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import build_narration as bn  # noqa: E402
+from narration_production import produce_regions
 
 def main() -> int:
     ap = argparse.ArgumentParser()
@@ -33,7 +30,8 @@ def main() -> int:
 
     spec_path = Path(args.spec).resolve()
     root = spec_path.parent
-    spec = read_spec(spec_path)
+    if args.design_only or args.dry_run or args.preflight:
+        spec = read_spec(spec_path)
     if args.design_only:
         print_design(spec)
         return 0
@@ -42,13 +40,7 @@ def main() -> int:
         print_inspection(spec, root, "fast", args.rate, args.preflight)
         return 0
 
-    require(root, "G3", spec_path)
-    rate = args.rate or spec.get("rate", "+22%")
-    if rate != spec.get("rate", "+22%"):
-        raise SystemExit("BLOCKED: --rate must match the approved spec rate")
-    require_spec(root, spec, "fast", rate)
-
-    asyncio.run(bn.build(spec, root, dry=False, mode="fast", rate=rate))
+    asyncio.run(produce_regions(spec_path, mode="fast", rate=args.rate))
     return 0
 
 

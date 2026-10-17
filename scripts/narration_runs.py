@@ -49,7 +49,7 @@ class NarrationRun:
         implementation = {
             name: file_digest(Path(__file__).with_name(name))
             for name in ("production.py", "media.py", "narration_cache.py",
-                         "narration_runs.py", "build_narration.py", "gen_tts.py",
+                         "narration_runs.py", "narration_production.py", "build_narration.py", "gen_tts.py",
                          "teaching.py", "audio_timing.py")
         }
         inputs = {

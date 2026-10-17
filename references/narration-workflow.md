@@ -98,3 +98,29 @@ python -m unittest discover -s scripts -p "test_*.py" -v
 ```
 
 关键行为由 CLI 回归覆盖：连续改稿只重配受影响片段、换声失效、raw/加工分离、旧缓存保留、损坏缓存拒绝、失败不替换计划、间隔更新 cue 和生产者冲突。
+
+## 6. 共享配音生产 module
+
+`scripts/narration_production.py` 提供按用途命名的 Python interface。普通版、快速版、场景配音和单句试听共用批准快照、本地预检、生产锁、运行生命周期、归档与发布协议；region/cue 与 `scene.text` 的音轨和计划生成分别保留内部 implementation。
+
+在 `scripts/` 可导入的 Python 环境中调用：
+
+```python
+from pathlib import Path
+from narration_production import produce_regions, produce_scenes, preview_sentence
+
+# 在现有异步调用环境内执行；普通版缺省 mode="standard"。
+plan = await produce_regions(Path("plan.build.json"))
+plan = await produce_regions(Path("plan.build.json"), mode="fast")
+summary = await produce_scenes(Path("narration.json"), output=Path("audio/narration"))
+summary = await preview_sentence(Path("preview.json"), output=Path("preview_audio"))
+```
+
+- `produce_regions()` 返回与根目录 `plan.json` 一致的计划。既有 `build(spec, root, dry, mode, rate)` 保留调用方式与返回结构，转交此入口；`dry=True` 仍不申请确认或创建运行。
+- `produce_scenes()` 和 `preview_sentence()` 返回本次清单与生成/复用摘要；timeline 仍发布到 `output/timeline.json`，其中音轨和清单路径相对于输入项目目录。
+- 直接 Python 调用执行与 CLI 相同的保护。批量配音在 module 内检查 G3；试听在 module 内检查 G2 与单句额外授权，不补签 G3。
+- `--design-only`、`--dry-run` 和 `--preflight` 继续复用本地设计与检查逻辑；它们不会通过生产入口请求真实 TTS。
+- 归档路径转换与兼容入口发布集中在 module 内。发布失败时尝试记录 `FAIL`，旧入口保持不变；若写入失败回执再次失败，异常链保留原发布错误，不报告成功。
+- 配音运行的实现指纹包含此 module；清单继续使用 schema 2，原始旁白缓存仍按原有内容与有效配置判断复用。
+
+回归同时覆盖旧 `build()` 调用和三个用途入口，并验证试听到批量配音的复用、试听授权拒绝、各入口发布失败与失败回执的异常链。SDK adapter 使用离线替身，文件行为使用临时目录，ffmpeg/ffprobe 在本地实际执行。

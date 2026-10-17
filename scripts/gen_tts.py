@@ -17,13 +17,9 @@ import asyncio
 import json
 from pathlib import Path
 
-from artifacts import atomic_bytes, atomic_json, file_lock
-from audio_timing import pad_scene
-from build_narration import tts
-from narration_cache import get_audio
-from narration_runs import NarrationRun, relative
-from production import inspection_report, narration_config, print_design, print_inspection, read_spec, read_spec_snapshot, spoken_text
-from user_gates import confirm_preview, require, require_spec_snapshot
+from narration_production import preview_sentence, produce_scenes
+from production import print_design, print_inspection, read_spec
+
 
 def load_narration(path: Path) -> dict:
     return read_spec(path)
@@ -45,57 +41,17 @@ def main():
                         help="单句试听，须交互授权，不代替 G3")
     args = parser.parse_args()
 
-    root = Path(args.narration_yaml).resolve().parent
-    if not args.dry_run and not args.preflight and not args.design_only and not args.preview:
-        require(root, "G3", Path(args.narration_yaml))
     source = Path(args.narration_yaml).resolve()
-    spec, source_sha256 = read_spec_snapshot(source)
-    if args.design_only:
-        print_design(spec)
+    if args.design_only or args.dry_run or args.preflight:
+        spec = read_spec(source)
+        if args.design_only:
+            print_design(spec)
+        else:
+            print_inspection(spec, source.parent, "scene", runtime=args.preflight)
         return
-    if args.dry_run or args.preflight:
-        print_inspection(spec, root, "scene", runtime=args.preflight)
-        return
-    if not args.preview:
-        source, source_sha256, spec = require_spec_snapshot(root, spec, "scene")
-    inspection_report(spec, root, "scene", runtime=True)
-    config = narration_config(spec, "scene")
-    voice = config["voice"]
-    scenes = spec["scenes"]
-    if args.preview:
-        texts = [spoken_text(s, "text") for s in scenes]
-        print(f"Preview: voice={voice}, rate={config['rate']}, texts={texts}")
-        confirm_preview(root, texts)
-    out_dir = Path(args.out_dir).resolve()
-    if Path(args.narration_yaml).resolve() == out_dir / "timeline.json":
-        raise ValueError("Use a separate narration input; timeline.json is generated")
-    with file_lock(root / ".narration-cache" / "production.lock"):
-        current = NarrationRun(root, spec, config, source, out_dir, source_sha256=source_sha256)
-        try:
-            timeline = []
-            for sc in scenes:
-                sid = sc["id"]
-                text = spoken_text(sc, "text")
-                out_path = current.directory / f"{sid}.wav"
-                cached, seconds, facts = asyncio.run(get_audio(
-                    text, config, root / ".narration-cache", tts))
-                atomic_bytes(out_path, cached.read_bytes())
-                timing = pad_scene(out_path, float(sc.get("hold", 0)), spec.get("fps", 24),
-                                   float(spec.get("tail_pad", 0)))
-                current.record(sid, out_path, [], [facts], timing)
-                timeline.append({
-                    "id": sid, "file": relative(out_path, root), "text": sc["text"],
-                    "spoken_text": text, "seconds": timing["frames"] / timing["fps"], **timing,
-                    "manifest": relative(current.manifest, root),
-                })
-            archived = [{**item, "file": relative(root / item["file"], current.directory),
-                         "manifest": "manifest.json"} for item in timeline]
-            summary = current.complete(archived, "timeline.json")
-            atomic_json(out_dir / "timeline.json", timeline)
-            print(json.dumps(summary, ensure_ascii=True))
-        except BaseException:
-            current.fail()
-            raise
+    produce = preview_sentence if args.preview else produce_scenes
+    summary = asyncio.run(produce(source, output=Path(args.out_dir)))
+    print(json.dumps(summary, ensure_ascii=True))
 
 
 if __name__ == "__main__":
