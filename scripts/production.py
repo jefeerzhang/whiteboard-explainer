@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import math
 import re
@@ -20,22 +21,31 @@ except ImportError:
     yaml = None  # type: ignore[assignment]
 
 
-def read_document(path: Path):
-    text = path.read_text(encoding="utf-8-sig")
+def read_document_snapshot(path: Path):
+    data = path.read_bytes()
+    text = data.decode("utf-8-sig")
     if path.suffix.lower() in (".yaml", ".yml"):
         if yaml is None:
             raise ValueError("YAML input requires PyYAML; JSON input needs no extra parser")
         spec = yaml.safe_load(text)
     else:
         spec = json.loads(text)
-    return spec
+    return spec, hashlib.sha256(data).hexdigest()
+
+
+def read_document(path: Path):
+    return read_document_snapshot(path)[0]
 
 
 def read_spec(path: Path) -> dict:
-    spec = read_document(path)
+    return read_spec_snapshot(path)[0]
+
+
+def read_spec_snapshot(path: Path) -> tuple[dict, str]:
+    spec, digest = read_document_snapshot(path)
     if not isinstance(spec, dict):
         raise ValueError("The production input must be an object")
-    return spec
+    return spec, digest
 
 
 def narration_config(spec: dict, mode: str = "standard", rate: str | None = None) -> dict:

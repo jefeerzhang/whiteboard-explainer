@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
+from artifacts import fingerprint
+
 
 class VideoTests(unittest.TestCase):
     def setUp(self):
@@ -341,6 +343,74 @@ class VideoTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("narration", output.lower())
         self.assertEqual(len(self.calls), 1)
+
+    def teaching_narration_sample(self, *, silent=False, legacy=False):
+        source = self.root / "plan.build.json"
+        scene = {
+            "id": "s01", "image": "board.png", "duration": 0.25, "role": "rule",
+            "visual": {"form": "text", "objects": ["rule"],
+                       "change": "show the rule", "order": ["rule"]},
+        }
+        if silent:
+            # Isolate the omitted-regions/empty-narration case from numeric hold coercion.
+            scene["hold"] = 0.0
+        else:
+            scene["regions"] = [{
+                "label": "spoken", "box": [0, 0, 1000, 1000], "annotation": "question",
+            }]
+        source.write_text(json.dumps({"teaching": True, "scenes": [scene]}))
+        design = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("build_narration.py")),
+             str(source), "--design-only"], capture_output=True, text=True, encoding="utf-8",
+        )
+        self.assertEqual(design.returncode, 0, design.stderr)
+        approved = self.root / "design.json"
+        report = json.loads(design.stdout)
+        if legacy:
+            report["teaching_plan"][0].update({
+                "hold": 0.0 if silent else 0,
+                "narration": [""] if silent else ["question"],
+            })
+        approved.write_text(json.dumps(report), encoding="utf-8")
+        self.approve("G2", approved)
+        if legacy:
+            state_path = self.root / ".user-gates.json"
+            state = json.loads(state_path.read_text())
+            state["G2"]["teaching_plans"] = [fingerprint(report["teaching_plan"])]
+            state_path.write_text(json.dumps(state))
+        self.approve("G3", source)
+
+        class Request:
+            async def save(self, filename):
+                with wave.open(str(filename), "wb") as audio:
+                    audio.setnchannels(1)
+                    audio.setsampwidth(2)
+                    audio.setframerate(24000)
+                    audio.writeframes(b"\xe8\x03" * 6000)
+
+        with patch("edge_tts.Communicate", return_value=Request()), \
+                patch.object(sys, "argv", ["build_narration", str(source)]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(importlib.import_module("build_narration").main(), 0)
+        return self.invoke("--only", "s01")
+
+    def test_g2_narration_sample_chain_keeps_default_hold_approval(self):
+        code, output = self.teaching_narration_sample()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.report(output)["status"], "PASS")
+
+    def test_g2_narration_sample_chain_keeps_empty_narration_approval(self):
+        code, output = self.teaching_narration_sample(silent=True)
+        self.assertEqual(code, 0, output)
+        self.assertEqual(self.report(output)["status"], "PASS")
+
+    def test_legacy_g2_numeric_spelling_keeps_its_reviewed_design(self):
+        code, output = self.teaching_narration_sample(legacy=True)
+        self.assertEqual(code, 0, output)
+
+    def test_legacy_g2_empty_narration_keeps_its_reviewed_design(self):
+        code, output = self.teaching_narration_sample(silent=True, legacy=True)
+        self.assertEqual(code, 0, output)
 
 
 if __name__ == "__main__":

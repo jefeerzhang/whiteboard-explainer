@@ -26,7 +26,7 @@ from audio_timing import pad_scene, silent_scene
 from narration_cache import get_audio
 from narration_runs import NarrationRun, relative
 from production import inspection_report, narration_config, print_design, print_inspection, read_spec, spoken_text
-from user_gates import require, require_spec
+from user_gates import require, require_spec_snapshot
 
 try:
     import edge_tts
@@ -82,16 +82,18 @@ def concat(parts: list[Path], out: Path) -> None:
 
 async def build(spec: dict, root: Path, dry: bool, mode: str = "standard",
                 rate: str | None = None) -> dict:
-    source = require_spec(root, spec, mode, rate) if not dry else None
+    source, source_sha256, spec = (require_spec_snapshot(root, spec, mode, rate)
+                                  if not dry else (None, None, spec))
     inspection_report(spec, root, mode, rate, runtime=not dry)
     config = narration_config(spec, mode, rate)
     if dry:
         return {"config": config, "scenes": spec["scenes"]}
     assert source is not None
+    assert source_sha256 is not None
     if source.resolve() == (root / "plan.json").resolve():
         raise ValueError("Use a separate build input; plan.json is the generated render plan")
     with file_lock(root / ".narration-cache" / "production.lock"):
-        current = NarrationRun(root, spec, config, source)
+        current = NarrationRun(root, spec, config, source, source_sha256=source_sha256)
         try:
             return await _build_run(spec, root, config, current)
         except BaseException:

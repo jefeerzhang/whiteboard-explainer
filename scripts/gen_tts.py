@@ -22,8 +22,8 @@ from audio_timing import pad_scene
 from build_narration import tts
 from narration_cache import get_audio
 from narration_runs import NarrationRun, relative
-from production import inspection_report, narration_config, print_design, print_inspection, read_spec, spoken_text
-from user_gates import confirm_preview, require, require_spec
+from production import inspection_report, narration_config, print_design, print_inspection, read_spec, read_spec_snapshot, spoken_text
+from user_gates import confirm_preview, require, require_spec_snapshot
 
 def load_narration(path: Path) -> dict:
     return read_spec(path)
@@ -48,7 +48,8 @@ def main():
     root = Path(args.narration_yaml).resolve().parent
     if not args.dry_run and not args.preflight and not args.design_only and not args.preview:
         require(root, "G3", Path(args.narration_yaml))
-    spec = load_narration(Path(args.narration_yaml))
+    source = Path(args.narration_yaml).resolve()
+    spec, source_sha256 = read_spec_snapshot(source)
     if args.design_only:
         print_design(spec)
         return
@@ -56,7 +57,7 @@ def main():
         print_inspection(spec, root, "scene", runtime=args.preflight)
         return
     if not args.preview:
-        require_spec(root, spec, "scene")
+        source, source_sha256, spec = require_spec_snapshot(root, spec, "scene")
     inspection_report(spec, root, "scene", runtime=True)
     config = narration_config(spec, "scene")
     voice = config["voice"]
@@ -69,7 +70,7 @@ def main():
     if Path(args.narration_yaml).resolve() == out_dir / "timeline.json":
         raise ValueError("Use a separate narration input; timeline.json is generated")
     with file_lock(root / ".narration-cache" / "production.lock"):
-        current = NarrationRun(root, spec, config, Path(args.narration_yaml).resolve(), out_dir)
+        current = NarrationRun(root, spec, config, source, out_dir, source_sha256=source_sha256)
         try:
             timeline = []
             for sc in scenes:

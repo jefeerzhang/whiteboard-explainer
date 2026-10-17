@@ -272,6 +272,80 @@ class ProductionTests(unittest.TestCase):
                 self.run_narration()
         self.assertFalse((self.root / "plan.json").exists())
 
+    def assert_preflight_source_change_is_blocked(self, script="build_narration",
+                                                 mode="standard", preview=False):
+        self.approve(mode)
+        original_run = subprocess.run
+        changed = []
+        requests = []
+
+        def edit_during_tool_probe(command, *args, **kwargs):
+            result = original_run(command, *args, **kwargs)
+            if "-encoders" in command and not changed:
+                if mode == "scene":
+                    self.spec["scenes"][0]["text"] = "a revised script"
+                else:
+                    self.spec["scenes"][0]["regions"][0]["annotation"] = "a revised script"
+                self.save()
+                changed.append(True)
+            return result
+
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)), \
+                patch("subprocess.run", side_effect=edit_during_tool_probe), \
+                patch("builtins.input", return_value="CONFIRM PREVIEW"):
+            with self.assertRaises((ValueError, SystemExit)):
+                args = ["--out-dir", str(self.root / "scene-output")] if mode == "scene" else []
+                if preview:
+                    args.append("--preview")
+                self.run_narration(script, *args)
+        self.assertEqual(changed, [True])
+        self.assertEqual(requests, [])
+        self.assertFalse((self.root / "plan.json").exists())
+        self.assertEqual(list(self.root.rglob("manifest.json")), [])
+
+    def test_source_changed_during_preflight_cannot_be_bound_as_the_synthesized_script(self):
+        self.assert_preflight_source_change_is_blocked()
+        self.approve()
+        requests = []
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)):
+            self.run_narration()
+        self.assertEqual([r[0] for r in requests], ["a revised script"])
+        plan = json.loads((self.root / "plan.json").read_text())
+        report = json.loads((self.root / plan["narration"]["manifest"]).read_text())
+        self.assertEqual(report["inputs"]["source_sha256"],
+                         hashlib.sha256(self.path.read_bytes()).hexdigest())
+        self.assertEqual(report["schema"], 2)
+
+    def test_fast_preflight_source_change_stops_before_synthesis(self):
+        self.assert_preflight_source_change_is_blocked("build_narration_fast", "fast")
+
+    def test_scene_preflight_source_change_stops_before_synthesis(self):
+        self.spec["scenes"] = [{"id": "s01", "text": "original scene"}]
+        self.save()
+        self.assert_preflight_source_change_is_blocked("gen_tts", "scene")
+
+    def test_preview_preflight_source_change_stops_before_synthesis(self):
+        self.spec["scenes"] = [{"id": "s01", "text": "original scene"}]
+        self.save()
+        self.assert_preflight_source_change_is_blocked("gen_tts", "scene", preview=True)
+
+    def test_legacy_pass_receipt_cannot_relabel_old_audio_as_a_new_script(self):
+        self.approve()
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts([])):
+            self.run_narration()
+        plan = json.loads((self.root / "plan.json").read_text())
+        manifest = self.root / plan["narration"]["manifest"]
+        self.spec["scenes"][0]["regions"][0]["annotation"] = "newly approved script"
+        self.save()
+        self.approve()
+        legacy = json.loads(manifest.read_text())
+        legacy["schema"] = 1
+        legacy["inputs"]["source_sha256"] = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        manifest.write_text(json.dumps(legacy))
+        result = self.cli("verify_media.py", "--manifest", manifest)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported", result.stderr)
+
     def test_competing_producer_is_rejected_before_another_tts_request(self):
         self.approve()
         attempts = []

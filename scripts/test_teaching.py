@@ -68,6 +68,28 @@ class TeachingTests(unittest.TestCase):
         self.assertIn("G2", result.stderr)
         self.assertFalse((self.root / ".narration-cache").exists())
 
+    def test_changed_narration_still_requires_new_g2_confirmation(self):
+        self.approvals()
+        self.spec["scenes"][0]["regions"][0]["annotation"] = "a different lesson"
+        self.save()
+        result = self.cli("user_gates.py", "--root", self.root, "approve", "G3",
+                          "--artifact", self.path, input_text="CONFIRM G3\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.cli("build_narration.py", self.path)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("G2", result.stderr)
+        self.assertFalse((self.root / ".narration-cache").exists())
+
+    def test_empty_normalization_does_not_accept_null_text_or_boolean_hold(self):
+        for annotation, hold, error in ((None, 0, "narration"), ("", False, "hold")):
+            with self.subTest(annotation=annotation, hold=hold):
+                self.spec["scenes"][0]["regions"][0]["annotation"] = annotation
+                self.spec["scenes"][0]["hold"] = hold
+                self.save()
+                result = self.cli("build_narration.py", self.path, "--design-only")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(error, result.stderr)
+
     def test_ordinary_explainer_is_not_forced_into_a_teaching_arc(self):
         self.spec.pop("teaching")
         self.spec["scenes"][0].pop("role")

@@ -54,6 +54,33 @@ class GateTests(unittest.TestCase):
                 gates.approve(self.root, "G3", [self.artifact])
         self.assertNotIn("G3", gates.load(self.root))
 
+    def test_design_changed_after_parsing_cannot_be_approved_with_old_metadata(self):
+        self.approve_through("G1")
+        material = self.root / "design.json"
+        report = {"teaching_plan": [{
+            "id": "s01", "role": "rule", "hold": 0, "narration": ["original"],
+            "visual": {"form": "text", "objects": ["rule"],
+                       "change": "show the rule", "order": ["rule"]},
+        }]}
+        material.write_text(json.dumps(report))
+        original_read = Path.read_bytes
+        changed = []
+
+        def read_then_edit(path):
+            data = original_read(path)
+            if path == material and not changed:
+                report["teaching_plan"][0]["narration"] = ["revised"]
+                material.write_text(json.dumps(report))
+                changed.append(True)
+            return data
+
+        with patch.object(Path, "read_bytes", read_then_edit), \
+                patch("builtins.input", return_value="CONFIRM G2"):
+            with self.assertRaises(gates.GateError):
+                gates.approve(self.root, "G2", [material])
+        self.assertEqual(changed, [True])
+        self.assertNotIn("G2", gates.load(self.root))
+
     def test_changed_missing_and_unapproved_inputs_block(self):
         self.approve_through("G3")
         gates.require(self.root, "G3", self.artifact)

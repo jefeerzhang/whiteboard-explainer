@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from artifacts import atomic_json, file_digest, file_lock, fingerprint
-from production import narration_config, read_document
+from production import narration_config, read_document, read_document_snapshot
 from render_contract import validate_evidence
 from teaching import artifact_design, teaching_plan
 
@@ -97,10 +97,13 @@ def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard"
             raise GateError(f"BLOCKED: {gate} evidence: {exc}")
     narration = {}
     designs = []
+    parsed_hashes: dict[str, str] = {}
     # Bind referenced boards/audio too, not just the JSON pointing at them.
     for path in list(files):
         if path.suffix.lower() in (".json", ".yaml", ".yml"):
-            content = read_document(path)
+            content, parsed_hashes[str(path)] = read_document_snapshot(path)
+            if path == evidence and fingerprint(content) != fingerprint(proof):
+                raise GateError("BLOCKED: render evidence changed while its snapshot was read")
             if isinstance(content, dict):
                 if gate == "G2":
                     design = artifact_design(content)
@@ -114,7 +117,8 @@ def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard"
                     for key in ("image", "audio"):
                         if scene.get(key):
                             files.add((path.parent / scene[key]).resolve())
-    hashes = {str(p): digest(p) for p in sorted(files)}
+    hashes = {str(p): parsed_hashes[str(p)] if str(p) in parsed_hashes else digest(p)
+              for p in sorted(files)}
     print(f"Approve {gate} for these exact files:")
     for filename in hashes:
         print(f"  {filename}")
@@ -169,24 +173,52 @@ def confirm_preview(root: Path, texts: list[str]) -> None:
 
 def require_spec(root: Path, spec: dict, mode: str = "standard",
                  rate: str | None = None) -> Path:
+    return require_spec_snapshot(root, spec, mode, rate)[0]
+
+
+def require_spec_snapshot(root: Path, spec: dict, mode: str = "standard",
+                          rate: str | None = None) -> tuple[Path, str, dict]:
+    """Pin the parsed approved document and its hash from one byte read."""
     require(root, "G3")
     require_teaching(root, spec)
     record = load(root.resolve())["G3"]
     for filename in record["artifacts"]:
         path = Path(filename)
-        if path.suffix.lower() in (".json", ".yaml", ".yml") and read_document(path) == spec:
+        if path.suffix.lower() not in (".json", ".yaml", ".yml"):
+            continue
+        document, digest = read_document_snapshot(path)
+        if document == spec:
+            if digest != record["artifacts"][filename]:
+                raise GateError("BLOCKED: G3 source changed while its snapshot was read")
             snapshot = record.get("narration")
             if (isinstance(snapshot, dict)
                     and snapshot.get(filename) == narration_config(spec, mode, rate)):
-                return path
+                return path, digest, document
             raise GateError("BLOCKED: G3 effective configuration differs or is missing; reapprove G3")
     raise GateError("BLOCKED: G3 does not approve this narration spec")
 
 
 def require_teaching(root: Path, spec: dict) -> None:
     design = teaching_plan(spec)
-    if design is not None and fingerprint(design) not in load(root)["G2"].get("teaching_plans", []):
-        raise GateError("BLOCKED: G2 must confirm this teaching design before narration")
+    if design is None:
+        return
+    require(root, "G2")
+    record = load(root)["G2"]
+    wanted = fingerprint(design)
+    if wanted in record.get("teaching_plans", []):
+        return
+    # Older records hashed raw JSON spelling; re-read only the exact approved material.
+    for filename, expected in record["artifacts"].items():
+        path = Path(filename)
+        if path.suffix.lower() not in (".json", ".yaml", ".yml"):
+            continue
+        document, digest = read_document_snapshot(path)
+        if digest != expected:
+            raise GateError("BLOCKED: G2 design changed while its snapshot was read")
+        approved = artifact_design(document) if isinstance(document, dict) else None
+        if approved is not None and fingerprint(approved) == wanted:
+            return
+    raise GateError("BLOCKED: G2 must confirm this teaching design before narration")
 
 
 def require_render(root: Path, key: str) -> None:

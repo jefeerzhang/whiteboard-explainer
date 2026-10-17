@@ -50,7 +50,10 @@ def validate_design(rows: list) -> list:
             raise ValueError(f"{sid}: practice must be followed by an answer scene")
         if row["role"] == "answer" and (index == 0 or rows[index - 1]["role"] != "practice"):
             raise ValueError(f"{sid}: answer must follow its practice scene")
-    return rows
+    # Approval identity follows the design, not JSON numeric or empty-slot spelling.
+    return [{**row, "hold": float(row.get("hold", 0)),
+             "narration": [text for text in row["narration"] if text.strip()]}
+            for row in rows]
 
 
 def teaching_plan(spec: dict) -> list | None:

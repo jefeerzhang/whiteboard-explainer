@@ -9,7 +9,7 @@ from artifacts import atomic_json, file_digest, fingerprint, relative
 from media import verify
 
 
-VERSION = 1
+VERSION = 2
 
 
 def read_run(path: Path) -> tuple[dict, set[Path]]:
@@ -40,7 +40,9 @@ def read_run(path: Path) -> tuple[dict, set[Path]]:
 
 class NarrationRun:
     def __init__(self, root: Path, spec: dict, config: dict,
-                 source: Path, output: Path | None = None):
+                 source: Path, output: Path | None = None, *, source_sha256: str):
+        if file_digest(source) != source_sha256:
+            raise ValueError("Narration source changed during preflight; reload and confirm the input")
         self.root = root.resolve()
         self.source = source
         self.images = {s["id"]: root / s["image"] for s in spec["scenes"] if s.get("image")}
@@ -51,7 +53,7 @@ class NarrationRun:
                          "teaching.py", "audio_timing.py")
         }
         inputs = {
-            "source": str(source.resolve()), "source_sha256": file_digest(source), "config": config,
+            "source": str(source.resolve()), "source_sha256": source_sha256, "config": config,
             "images": {s["id"]: file_digest(root / s["image"])
                        for s in spec["scenes"] if s.get("image")},
             "implementation": implementation,
