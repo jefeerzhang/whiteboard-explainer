@@ -22,7 +22,7 @@ from narration_production import produce_regions
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("spec", help="plan.build.json")
-    ap.add_argument("--rate", help="须匹配 spec.rate（未指定时使用 spec.rate 或 +22%）")
+    ap.add_argument("--rate", help="须匹配 spec.rate（未指定时使用 spec.rate 或 +22%%）")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--preflight", action="store_true")
     ap.add_argument("--design-only", action="store_true")
