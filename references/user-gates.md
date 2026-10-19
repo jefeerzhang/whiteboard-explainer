@@ -10,34 +10,47 @@
 2. **每次请用户决定时**：用编号选项；推荐项放第一，标「（推荐）」；每项写动作与后果。
 3. **用户改口时**：从被改的那一闸重来；重新生成受影响产物并保留历史副本，不自动删除旧素材。
 4. **「70% 即交付」只作用于画面微调**：构图对、元素对即可，不逐拍修图。它**不**允许跳过下列闸门。
-5. **确认绑定版本**：每集通过 `scripts/user_gates.py` 保存 `.user-gates.json`，记录确认版本及文件 SHA-256。受保护入口在缺少确认、文件缺失或内容变化时停止。重新确认某闸会清除下游确认。口头同意或豁免也必须经交互录入，不能靠聊天记录绕过脚本。
+5. **确认绑定版本**：每集通过 `scripts/user_gates.py` 保存 `.user-gates.json`，记录确认版本及文件 SHA-256。受保护入口在缺少确认、文件缺失或内容变化时停止。重新确认某闸会清除下游确认。确认在对话中完成，`confirm --note` 必须逐字引用用户原话；口头同意或豁免也必须留记录，不能靠聊天记忆绕过脚本。
 
 ## 脚本拦截与操作
 
-每集使用独立项目目录；输入 JSON 放在该目录中。以下示例在集目录内执行，`<skill>` 替换为本 skill 的绝对路径。确认命令须由用户在终端审阅文件后输入 `CONFIRM Gx`，Agent 不得自动填入确认。
+每集使用独立项目目录；输入 JSON 放在该目录中。以下示例在集目录内执行，`<skill>` 替换为本 skill 的绝对路径。
+
+确认分两步，全程没有终端弹窗：
+
+1. `approve` 冻结并打印待确认内容，**不写** `.user-gates.json`。Agent 把打印结果原样贴进对话，请用户确认。
+2. 用户在对话中回答后，Agent 跑 `confirm`，把用户原话用 `--note` 逐字传入。脚本据此写入 `.user-gates.json`。
+
+用户拒绝或改口时，用 `discard <闸号>` 丢弃暂存内容，不要 `confirm`。待确认文件在确认或丢弃前一直留在 `.user-gates.pending.json`；其间任何文件变化都会让 `confirm` 失败，必须重跑 `approve`。
 
 ```bash
 python <skill>/scripts/user_gates.py --root . approve G0 --artifact task.md
+python <skill>/scripts/user_gates.py --root . confirm G0 --note "用户原话"
 python <skill>/scripts/user_gates.py --root . approve G1 --artifact style.md
+python <skill>/scripts/user_gates.py --root . confirm G1 --note "用户原话"
 python <skill>/scripts/user_gates.py --root . approve G2 --artifact 讲稿.md
+python <skill>/scripts/user_gates.py --root . confirm G2 --note "讲稿确认，可以画"
 # 自定义 PIL 绘图也必须经此入口运行：
 python <skill>/scripts/user_gates.py --root . run boards -- python make_boards.py
 # G3 必须绑定实际配音输入；快速版 rate 写入 plan.build.json，并与 --rate 一致：
 python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
+python <skill>/scripts/user_gates.py --root . confirm G3 --note "音色 1 + 语速 A"
 python <skill>/scripts/build_narration_fast.py plan.build.json
 python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4 --only s01
 # 用户看过单拍与抽帧后，使用 REPORT.receipt 的实际路径：
 python <skill>/scripts/user_gates.py --root . approve G4 --artifact <sample.json路径>
+python <skill>/scripts/user_gates.py --root . confirm G4 --note "样片没问题"
 python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4
 # 用户完整观看后，确认全量运行的类型化回执：
 python <skill>/scripts/user_gates.py --root . approve G5 --artifact <render.json路径>
+python <skill>/scripts/user_gates.py --root . confirm G5 --note "成片确认，可以交付"
 python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 ```
 
 - 内建拦截：`gen_board_images.py` 要求 G2；`make_text_layer.py` 要求当前目录（或 `--project-root`）的 G2；两个 `build_narration` CLI 和 `gen_tts.py` 批量模式要求 G3 且绑定当前输入与有效配置；渲染单拍要求 G3，全量要求 G4 且绑定当前 `plan.json`。共享 `build()` 也检查 G3 和实际输入内容。
 - G3 的 `--mode standard`、`--mode fast`、`--mode scene` 分别对应普通版、快速版和场景配音。旧 G3 没有有效配置快照时须重新确认。预检、缓存与配音清单操作见 [narration-workflow.md](narration-workflow.md)。
 - 审批 JSON 含场景 `image` / `audio` 时，同时记录引用文件的哈希。后续改变画板或音频也会使确认失效。
-- 支持 `--dry-run` 的入口在该模式下不要求确认。G3 前的单句探测用 `gen_tts.py preview.yaml --preview --out-dir <试听目录>`；YAML 只能有一条非空、至多 100 字的文本，且需 G2 和额外输入 `CONFIRM PREVIEW`。该授权不通过 G3；YAML 解析依赖 `requirements.txt` 中的 PyYAML。
+- 支持 `--dry-run` 的入口在该模式下不要求确认。G3 前的单句探测用 `gen_tts.py preview.yaml --preview --out-dir <试听目录>`；YAML 只能有一条非空、至多 100 字的文本，且需已过 G2。用户须先在对话中单独授权这句试听，`--preview` 不弹窗，只把授权写入 `.user-gates.json` 的 `preview` 节留审计；该授权不通过 G3。YAML 解析依赖 `requirements.txt` 中的 PyYAML。
 - 自定义 `build_voice.py`、外部 apiz 和其他制作程序必须用 `user_gates.py run tts -- <命令>` 包裹；自定义交付命令用 `run deliver`。只有受保护入口和该包装器执行拦截，直接调用外部工具不受控制。
 - G4/G5 强制验证样片/全量回执类型、方案、产物和必要检查。教学设计、视频缓存和回执迁移见 [render-workflow.md](render-workflow.md)。
 - 这不是安全沙箱。能改脚本或审批文件的人仍能绕过；哈希不能证明用户实际观看，也不能自动核对教学语义。写稿与人工观看仍须遵守协议。
@@ -50,8 +63,8 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 | G1 | 讲稿风格 | 写完整讲稿前（可与覆盖度清单同轮） | 风格选项（见下） | 用户选定一种风格 | 按该风格写 `讲稿.md` |
 | G2 | 讲稿内容 | `讲稿.md` 自检完成后 | 完整讲稿 + 自检勾选结果 + 覆盖度清单 | 用户明确说「讲稿确认 / 可以画」 | 写 `make_boards.py`、出图 |
 | G3 | TTS 语音 | 讲稿确认后、跑 TTS 前 | 后端 + 音色 + 语速选项；可选试听一句 | 用户选定 voice（与可选 rate） | `build_narration*` / `build_voice` |
-| G4 | 冒烟一拍 | 全量渲染前 | 单拍、两张抽帧与 sample.json | 用户确认并交互录入当前回执 | 同方案全量渲染 |
-| G5 | 最终成片 | 全量渲染和技术质检后 | 完整视频、render.json 与已知问题 | 必要检查通过，用户确认或明确豁免后交互录入 | 标记交付完成 |
+| G4 | 冒烟一拍 | 全量渲染前 | 单拍、两张抽帧与 sample.json | 用户确认并记录该次回执 | 同方案全量渲染 |
+| G5 | 最终成片 | 全量渲染和技术质检后 | 完整视频、render.json 与已知问题 | 必要检查通过，用户确认或明确豁免后记录 | 标记交付完成 |
 
 系列量产时：**每一集**都过 G2→G5；G0/G1 可在系列开头确认一次，换风格或换音色时重开。
 
@@ -184,7 +197,7 @@ python scripts/render_explainer.py plan.json --out out/<name>.mp4 --only s01
 # CLI 自动生成样片、两张抽帧与 sample.json
 ```
 
-请用户看样片与抽帧：cue 顺序、有无提前画出未讲元素。用户通过后交互录入该次 sample.json，才能按同一配置全量渲染。
+请用户看样片与抽帧：cue 顺序、有无提前画出未讲元素。用户通过后，用 `approve G4` 打印的内容在对话中确认，再 `confirm G4 --note "<用户原话>"` 记录该次 sample.json，才能按同一配置全量渲染。
 
 ---
 
@@ -211,7 +224,7 @@ python scripts/render_explainer.py plan.json --out out/<name>.mp4 --only s01
 2. 修改成片 — 请提供时间点或拍号及问题；修改后重新提交确认。
 ```
 
-未获确认或明确豁免时，只能报告「成片已生成，等待 G5 确认」。随后仍须由用户交互录入当前 render.json，不能用口头回复或说明文件替代技术证据。
+未获确认或明确豁免时，只能报告「成片已生成，等待 G5 确认」。随后仍须 `approve G5` 后由 Agent 跑 `confirm G5 --note "<用户原话>"`，不能用口头回复或说明文件替代技术证据。
 
 ---
 

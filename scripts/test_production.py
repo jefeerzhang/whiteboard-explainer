@@ -90,11 +90,14 @@ class ProductionTests(unittest.TestCase):
         gates = ("G0", "G1", "G2", "G3")
         for gate in gates[:gates.index(through) + 1]:
             artifact = self.path if gate == "G3" else note
+            extra = ["--mode", mode] if gate == "G3" else []
             result = self.cli(
                 "user_gates.py", "--root", self.root, "approve", gate,
-                "--artifact", artifact, *(["--mode", mode] if gate == "G3" else []),
-                input_text=f"CONFIRM {gate}\n",
+                "--artifact", artifact, *extra,
             )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = self.cli("user_gates.py", "--root", self.root, "confirm", gate,
+                              "--note", f"用户确认 {gate}")
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_g3_records_the_effective_fast_configuration(self):
@@ -295,8 +298,7 @@ class ProductionTests(unittest.TestCase):
             return result
 
         with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)), \
-                patch("subprocess.run", side_effect=edit_during_tool_probe), \
-                patch("builtins.input", return_value="CONFIRM PREVIEW"):
+                patch("subprocess.run", side_effect=edit_during_tool_probe):
             with self.assertRaises((ValueError, SystemExit)):
                 args = ["--out-dir", str(self.root / "scene-output")] if mode == "scene" else []
                 if preview:
@@ -440,11 +442,12 @@ class ProductionTests(unittest.TestCase):
         batch_output = self.root / "batch"
         requests = []
         with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)):
-            with patch("builtins.input", return_value="CONFIRM PREVIEW"):
-                text = self.run_narration("gen_tts", "--preview", "--out-dir", str(preview_output))
+            text = self.run_narration("gen_tts", "--preview", "--out-dir", str(preview_output))
             preview = json.loads(text.splitlines()[-1])
-            self.assertEqual(state.read_bytes(), approved)
+            audited = json.loads(state.read_text())
+            self.assertNotIn("G3", audited)
             self.assertNotIn("G3", json.loads(approved))
+            self.assertIn("preview", audited)
             self.assertEqual(preview["generated"], 1)
             self.approve("scene")
             batch = json.loads(self.run_narration(
@@ -462,15 +465,14 @@ class ProductionTests(unittest.TestCase):
             self.assertEqual((manifest.parent / report["artifact"]).name, "timeline.json")
             self.assertTrue((self.root / timeline[0]["file"]).is_file())
 
-    def test_shared_preview_rejects_missing_g2_cancellation_and_long_text(self):
+    def test_shared_preview_rejects_missing_g2_and_long_text(self):
         from narration_production import preview_sentence
         from user_gates import GateError
 
         output = self.root / "preview"
-        for case, through, answer, text in (
-            ("missing G2", "G1", "CONFIRM PREVIEW", "preview text"),
-            ("cancelled", "G2", "no", "preview text"),
-            ("too long", "G2", "CONFIRM PREVIEW", "x" * 101),
+        for case, through, text in (
+            ("missing G2", "G1", "preview text"),
+            ("too long", "G2", "x" * 101),
         ):
             with self.subTest(case=case):
                 self.spec["scenes"] = [{"id": "s01", "text": text}]
@@ -478,7 +480,6 @@ class ProductionTests(unittest.TestCase):
                 self.approve("scene", through=through)
                 requests = []
                 with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)), \
-                        patch("builtins.input", return_value=answer), \
                         contextlib.redirect_stdout(io.StringIO()), self.assertRaises(GateError):
                     asyncio.run(preview_sentence(self.path, output=output))
                 self.assertEqual(requests, [])
@@ -502,8 +503,7 @@ class ProductionTests(unittest.TestCase):
                 if mode == "preview":
                     args.append("--preview")
                 target = output / "timeline.json" if is_scene else self.root / "plan.json"
-                with patch("edge_tts.Communicate", side_effect=self.fake_tts([])), \
-                        patch("builtins.input", return_value="CONFIRM PREVIEW"):
+                with patch("edge_tts.Communicate", side_effect=self.fake_tts([])):
                     self.run_narration(script, *args)
                     original = target.read_bytes()
                     before = set(self.root.rglob("manifest.json"))

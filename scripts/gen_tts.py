@@ -9,7 +9,7 @@
       text: "盛唐长安，万邦来朝……"
 
 运行目录位于 --out-dir/runs/ 下；--out-dir/timeline.json 保留兼容入口。
---dry-run / --preflight 不调用合成；--preview 须单独获准。
+--dry-run / --preflight 不调用合成；--preview 须先在对话中获用户授权。
 """
 from __future__ import annotations
 import argparse
@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--preflight", action="store_true", help="仅执行本地预检")
     parser.add_argument("--design-only", action="store_true")
     parser.add_argument("--preview", action="store_true",
-                        help="单句试听，须交互授权，不代替 G3")
+                        help="单句试听，须先在对话中获用户授权，不代替 G3")
     args = parser.parse_args()
 
     source = Path(args.narration_yaml).resolve()

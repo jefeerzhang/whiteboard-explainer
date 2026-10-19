@@ -24,19 +24,22 @@ python <skill>/scripts/gen_tts.py narration.json --preflight
 
 ## 2. G3 确认实际配置
 
-G0–G2 按既有协议完成后，再由用户交互录入 G3。审批前展示有效音色、语速、SDK 版本和处理配置。
+G0–G2 按既有协议完成后，再由用户在对话中确认 G3。`approve` 打印有效音色、语速、SDK 版本和处理配置；用户回答后再跑 `confirm`。
 
 ```bash
 # 普通版
 python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode standard
+python <skill>/scripts/user_gates.py --root . confirm G3 --note "音色 1 + 语速 A"
 python <skill>/scripts/build_narration.py plan.build.json
 
 # 快速版：须单独确认；默认 +22%，且裁首尾静音
 python <skill>/scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
+python <skill>/scripts/user_gates.py --root . confirm G3 --note "音色 1 + 快速版 +22%"
 python <skill>/scripts/build_narration_fast.py plan.build.json
 
 # 按 scene.text 配音
 python <skill>/scripts/user_gates.py --root . approve G3 --artifact narration.json --mode scene
+python <skill>/scripts/user_gates.py --root . confirm G3 --note "音色 1"
 python <skill>/scripts/gen_tts.py narration.json --out-dir audio/narration
 ```
 
@@ -44,7 +47,7 @@ python <skill>/scripts/gen_tts.py narration.json --out-dir audio/narration
 - 场景配音支持原有 `speed`；未写 `rate` 时折算为百分比。有效值会在预检与审批时展示。
 - 改稿、换声、改语速或切换处理配置后，须重新确认 G3。旧版没有有效配置快照的 G3 会被拒绝，不能自动补签。
 - region 的 `annotation`、scene 的 `text` 保留画面原文。可用 `spoken_text` 明确指定实际口播；缓存按实际提交文本判定。
-- 单句 `--preview` 仍要求 G2 和额外交互授权，最多一条、100 字，按实际 `spoken_text` 检查；试听不通过 G3。
+- 单句 `--preview` 仍要求已过 G2，且须先在对话中单独获用户授权；最多一条、100 字，按实际 `spoken_text` 检查。授权写入 `.user-gates.json` 的 `preview` 节，不通过 G3。
 - 本轮可靠性保证限于上述内置 CLI。外部 apiz 命令和自定义 monkey-patch 后端不自动获得相同缓存与配置契约。
 
 ## 3. 缓存与运行清单

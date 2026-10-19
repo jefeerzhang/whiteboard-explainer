@@ -43,8 +43,9 @@ class VideoTests(unittest.TestCase):
 
     def approve(self, gate, artifact):
         import user_gates
-        with patch("builtins.input", return_value=f"CONFIRM {gate}"), contextlib.redirect_stdout(io.StringIO()):
-            user_gates.approve(self.root, gate, [artifact])
+        with contextlib.redirect_stdout(io.StringIO()):
+            user_gates.stage(self.root, gate, [artifact])
+            user_gates.commit(self.root, gate, f"用户确认 {gate}")
 
     def fake_engine(self, fade_duration=0.1):
         calls = self.calls

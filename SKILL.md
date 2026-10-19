@@ -16,7 +16,7 @@ description: 白板讲解动画 skill：把知识讲解/科普/推导内容变�
 
 **禁止**在未获用户明确同意时连续完成「写稿→画板→配音→渲染」。  
 完整协议、选项表、确认话术模板见 **`references/user-gates.md`**。开做前必须读。
-脚本审批入口：`scripts/user_gates.py`。每集独立保存 `.user-gates.json`；用户交互确认，文件变更使确认失效。自定义绘图/TTS 命令必须用其 `run` 子命令包裹，详见上述协议。
+脚本审批入口：`scripts/user_gates.py`。每集独立保存 `.user-gates.json`；确认在对话中完成（`approve` 打印待确认内容，用户回答后 `confirm --note "<用户原话>"`），文件变更使确认失效。自定义绘图/TTS 命令必须用其 `run` 子命令包裹，详见上述协议。
 内置配音的本地预检、G3 与配音清单见 **`references/narration-workflow.md`**。视频缓存、类型化 G4/G5 回执、可选教学设计与停顿见 **`references/render-workflow.md`**。
 
 | 闸 | 确认什么 | 未通过时禁止 |

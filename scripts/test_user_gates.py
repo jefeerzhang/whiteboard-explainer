@@ -19,10 +19,13 @@ class GateTests(unittest.TestCase):
         self.artifact = self.root / "script.md"
         self.artifact.write_text("reviewed", encoding="utf-8")
 
+    def record(self, gate, artifacts=None, note="用户确认"):
+        gates.stage(self.root, gate, artifacts or [self.artifact])
+        gates.commit(self.root, gate, note)
+
     def approve_through(self, last):
         for gate in gates.GATES[:gates.GATES.index(last) + 1]:
-            with patch("builtins.input", return_value=f"CONFIRM {gate}"):
-                gates.approve(self.root, gate, [self.artifact])
+            self.record(gate)
 
     def test_missing_or_malformed_approval_blocks(self):
         with self.assertRaises(gates.GateError):
@@ -31,27 +34,57 @@ class GateTests(unittest.TestCase):
         with self.assertRaises(gates.GateError):
             gates.require(self.root, "G2")
 
-    def test_cannot_skip_or_cancel_gate(self):
+    def test_staging_records_nothing_and_commit_needs_the_staged_review(self):
         with self.assertRaises(gates.GateError):
-            gates.approve(self.root, "G3", [self.artifact])
-        with patch("builtins.input", return_value="no"):
-            with self.assertRaises(gates.GateError):
-                gates.approve(self.root, "G0", [self.artifact])
+            gates.stage(self.root, "G3", [self.artifact])
+        gates.stage(self.root, "G0", [self.artifact])
         self.assertFalse((self.root / gates.STATE_FILE).exists())
+        with self.assertRaises(gates.GateError):
+            gates.commit(self.root, "G0", "   ")
+        with self.assertRaises(gates.GateError):
+            gates.commit(self.root, "G1", "用户确认")
+        gates.commit(self.root, "G0", "用户确认 G0")
+        self.assertIn("G0", gates.load(self.root))
+
+    def test_review_and_commit_never_prompt_the_terminal(self):
+        command = [sys.executable, str(Path(gates.__file__).resolve()), "--root", str(self.root)]
+        # DEVNULL stdin: any input() call would fail instead of waiting on the user.
+        result = subprocess.run(
+            command + ["approve", "G0", "--artifact", str(self.artifact)],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Review G0", result.stdout)
+        self.assertFalse((self.root / gates.STATE_FILE).exists())
+        result = subprocess.run(
+            command + ["confirm", "G0", "--note", "讲稿确认"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Recorded G0", result.stdout)
+        self.assertEqual(gates.load(self.root)["G0"]["note"], "讲稿确认")
+        self.assertFalse((self.root / gates.PENDING_FILE).exists())
+
+    def test_artifact_changed_between_review_and_commit_blocks(self):
+        gates.stage(self.root, "G0", [self.artifact])
+        self.artifact.write_text("changed after the user read it", encoding="utf-8")
+        with self.assertRaises(gates.GateError):
+            gates.commit(self.root, "G0", "用户确认")
+        self.assertNotIn("G0", gates.load(self.root))
+
+    def test_discard_removes_the_staged_review(self):
+        gates.stage(self.root, "G0", [self.artifact])
+        gates.discard(self.root, "G0")
+        with self.assertRaises(gates.GateError):
+            gates.commit(self.root, "G0", "用户确认")
+        self.assertNotIn("G0", gates.load(self.root))
 
     def test_parent_changed_while_confirmation_waited_cannot_be_overwritten(self):
         self.approve_through("G2")
+        gates.stage(self.root, "G3", [self.artifact])
         revised = self.root / "revised.md"
         revised.write_text("a different approved script")
-
-        def confirm_after_parent_changed(prompt):
-            with patch("builtins.input", return_value="CONFIRM G2"):
-                gates.approve(self.root, "G2", [revised])
-            return "CONFIRM G3"
-
-        with patch("builtins.input", side_effect=confirm_after_parent_changed):
-            with self.assertRaises(gates.GateError):
-                gates.approve(self.root, "G3", [self.artifact])
+        self.record("G2", [revised])
+        with self.assertRaises(gates.GateError):
+            gates.commit(self.root, "G3", "用户确认")
         self.assertNotIn("G3", gates.load(self.root))
 
     def test_design_changed_after_parsing_cannot_be_approved_with_old_metadata(self):
@@ -74,10 +107,10 @@ class GateTests(unittest.TestCase):
                 changed.append(True)
             return data
 
-        with patch.object(Path, "read_bytes", read_then_edit), \
-                patch("builtins.input", return_value="CONFIRM G2"):
-            with self.assertRaises(gates.GateError):
-                gates.approve(self.root, "G2", [material])
+        with patch.object(Path, "read_bytes", read_then_edit):
+            gates.stage(self.root, "G2", [material])
+        with self.assertRaises(gates.GateError):
+            gates.commit(self.root, "G2", "用户确认")
         self.assertEqual(changed, [True])
         self.assertNotIn("G2", gates.load(self.root))
 
@@ -95,8 +128,7 @@ class GateTests(unittest.TestCase):
 
     def test_reapproval_clears_downstream(self):
         self.approve_through("G3")
-        with patch("builtins.input", return_value="CONFIRM G2"):
-            gates.approve(self.root, "G2", [self.artifact])
+        self.record("G2")
         gates.require(self.root, "G2")
         with self.assertRaises(gates.GateError):
             gates.require(self.root, "G3")
@@ -106,21 +138,21 @@ class GateTests(unittest.TestCase):
         image.write_bytes(b"image")
         plan = self.root / "plan.json"
         plan.write_text(json.dumps({"scenes": [{"image": "board.png"}]}))
-        with patch("builtins.input", return_value="CONFIRM G0"):
-            gates.approve(self.root, "G0", [plan])
+        self.record("G0", [plan])
         image.write_bytes(b"different")
         with self.assertRaises(gates.GateError):
             gates.require(self.root, "G0")
 
-    def test_preview_is_single_line_and_requires_confirmation(self):
+    def test_preview_is_single_line_and_needs_g2(self):
+        with self.assertRaises(gates.GateError):
+            gates.authorize_preview(self.root, ["one"])
         self.approve_through("G2")
         with self.assertRaises(gates.GateError):
-            gates.confirm_preview(self.root, ["one", "two"])
-        with patch("builtins.input", return_value="no"):
-            with self.assertRaises(gates.GateError):
-                gates.confirm_preview(self.root, ["one"])
-        with patch("builtins.input", return_value="CONFIRM PREVIEW"):
-            gates.confirm_preview(self.root, ["one"])
+            gates.authorize_preview(self.root, ["one", "two"])
+        with self.assertRaises(gates.GateError):
+            gates.authorize_preview(self.root, ["x" * 101])
+        gates.authorize_preview(self.root, ["one"])
+        self.assertIn("preview", gates.load(self.root))
         with self.assertRaises(gates.GateError):
             gates.require(self.root, "G3")
 
@@ -167,8 +199,7 @@ class GateTests(unittest.TestCase):
         self.approve_through("G2")
         spec = self.root / "plan.build.json"
         spec.write_text('{"voice": "selected", "scenes": []}', encoding="utf-8")
-        with patch("builtins.input", return_value="CONFIRM G3"):
-            gates.approve(self.root, "G3", [spec])
+        self.record("G3", [spec])
         gates.require_spec(self.root, {"voice": "selected", "scenes": []})
         with self.assertRaises(gates.GateError):
             gates.require_spec(self.root, {"voice": "different", "scenes": []})
@@ -220,8 +251,7 @@ class GateTests(unittest.TestCase):
         self.approve_through("G2")
         spec = self.root / "plan.build.json"
         spec.write_text('{"scenes": [], "rate": "+22%"}', encoding="utf-8")
-        with patch("builtins.input", return_value="CONFIRM G3"):
-            gates.approve(self.root, "G3", [spec])
+        self.record("G3", [spec])
         script = Path(gates.__file__).with_name("build_narration_fast.py")
         result = subprocess.run(
             [sys.executable, str(script), str(spec), "--rate=+15%"],

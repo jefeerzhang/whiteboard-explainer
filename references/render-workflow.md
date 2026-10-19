@@ -14,10 +14,11 @@ python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4 --only 
 
 CLI 末行 `REPORT` 是 JSON，提供 `output`、`receipt`、`checks` 和 `video_cache`。
 单拍回执是 `.render-runs/<方案指纹>/<运行编号>/sample.json`。
-该目录同时保存样片和两张抽帧。先看视频和抽帧，再由用户交互确认：
+该目录同时保存样片和两张抽帧。先看视频和抽帧，再在对话中确认：
 
 ```bash
 python <skill>/scripts/user_gates.py --root . approve G4 --artifact <sample.json路径>
+python <skill>/scripts/user_gates.py --root . confirm G4 --note "样片没问题"
 python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4
 ```
 
@@ -28,6 +29,7 @@ python <skill>/scripts/render_explainer.py plan.json --out out/video.mp4
 python <skill>/scripts/verify_media.py --manifest <render.json路径>
 # 用户完整观看后：
 python <skill>/scripts/user_gates.py --root . approve G5 --artifact <render.json路径>
+python <skill>/scripts/user_gates.py --root . confirm G5 --note "成片确认，可以交付"
 python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 ```
 
@@ -39,7 +41,8 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 - 回执中的视频缓存数量是本次分拍的生成/复用事实，不代表没有执行拼接、解码和校验。
 - 输入或实现变化后须重新生成样片并确认 G4；重新确认会清除下游确认。
 - 确认时使用文件锁，并核对等待期间的上一闸版本；并发改口不会被旧确认覆盖。
-- 不得由 Agent 在真实项目中代填 `CONFIRM`，测试夹具中的替身确认不能用于交付。
+- `approve` 与 `confirm` 之间有延迟时，任一受审文件或回执变化都会让 `confirm` 失败，必须重跑 `approve`。
+- Agent 只能把用户真实说过的话写进 `--note`；不得替用户作答或编造原话。测试夹具中的替身确认不能用于交付。
 
 ## 2. 缓存、目录与覆盖规则
 
@@ -106,6 +109,7 @@ G2 必须先于绘图。用不读取画板、不请求 SDK 的设计输出解决
 ```bash
 python <skill>/scripts/build_narration.py plan.build.json --design-only > design.json
 python <skill>/scripts/user_gates.py --root . approve G2 --artifact 讲稿.md --artifact design.json
+python <skill>/scripts/user_gates.py --root . confirm G2 --note "讲稿确认，可以画"
 ```
 
 上述为 Bash 重定向示例；Windows PowerShell 可用 `... --design-only | Set-Content -Encoding utf8 design.json`，避免保存成 UTF-16。

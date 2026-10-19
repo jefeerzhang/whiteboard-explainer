@@ -23,6 +23,7 @@ self_test_artifacts/
 .render-runs/
 .*.mp4.lock
 .user-gates.json
+.user-gates.pending.json
 .user-gates.lock
 *.mp4
 *.mp3

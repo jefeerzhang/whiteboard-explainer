@@ -39,6 +39,7 @@
 ```bash
 python scripts/build_narration_fast.py plan.build.json --preflight
 python scripts/user_gates.py --root . approve G3 --artifact plan.build.json --mode fast
+python scripts/user_gates.py --root . confirm G3 --note "音色 1 + 快速版 +22%"
 python scripts/build_narration_fast.py plan.build.json
 ```
 

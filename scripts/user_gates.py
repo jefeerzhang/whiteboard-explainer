@@ -1,4 +1,8 @@
-"""Persistent, version-bound production approvals. Not a security boundary."""
+"""Persistent, version-bound production approvals. Not a security boundary.
+
+Confirmation happens in the conversation: ``approve`` stages a review and prints it,
+``confirm`` records it once the user has answered. No terminal prompt is used.
+"""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +18,7 @@ from teaching import artifact_design, teaching_plan
 
 
 STATE_FILE = ".user-gates.json"
+PENDING_FILE = ".user-gates.pending.json"
 GATES = tuple(f"G{i}" for i in range(6))
 ACTIONS = {"boards": "G2", "tts": "G3", "sample": "G3",
            "render": "G4", "deliver": "G5"}
@@ -69,7 +74,9 @@ def require(root: Path, gate: str, artifact: Path | None = None) -> None:
             raise GateError(f"BLOCKED: {gate} does not approve this input: {filename}")
 
 
-def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard") -> None:
+def stage(root: Path, gate: str, artifacts: list[Path],
+          mode: str = "standard") -> dict:
+    """Freeze what the user must review. Writes nothing to the approval file."""
     root = root.resolve()
     index = GATES.index(gate)
     if index:
@@ -79,16 +86,17 @@ def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard"
         raise GateError("BLOCKED: at least one artifact is required")
     files = {p.resolve() for p in artifacts}
     evidence = None
+    proof = None
     if gate in ("G4", "G5"):
         try:
-            stage = "sample" if gate == "G4" else "render"
+            stage_name = "sample" if gate == "G4" else "render"
             candidates = [p for p in files if p.suffix.lower() == ".json"
                           and isinstance(read_document(p), dict)
-                          and read_document(p).get("stage") == stage]
+                          and read_document(p).get("stage") == stage_name]
             if len(candidates) != 1:
-                raise ValueError(f"{gate} requires exactly one {stage} receipt")
+                raise ValueError(f"{gate} requires exactly one {stage_name} receipt")
             evidence = candidates[0]
-            proof, dependencies = validate_evidence(evidence, stage)
+            proof, dependencies = validate_evidence(evidence, stage_name)
             require_narration(root, proof["context"])
             if gate == "G5" and proof["context"]["key"] != load(root)["G4"]["render_key"]:
                 raise ValueError("G5 does not match the confirmed G4 sample")
@@ -119,56 +127,116 @@ def approve(root: Path, gate: str, artifacts: list[Path], mode: str = "standard"
                             files.add((path.parent / scene[key]).resolve())
     hashes = {str(p): parsed_hashes[str(p)] if str(p) in parsed_hashes else digest(p)
               for p in sorted(files)}
-    print(f"Approve {gate} for these exact files:")
-    for filename in hashes:
+    review = {"gate": gate, "artifacts": hashes, "narration": narration,
+              "teaching_plans": [fingerprint(design) for design in designs],
+              "designs": designs,
+              "evidence": str(evidence) if evidence else None,
+              "render_key": proof["context"]["key"] if proof else None,
+              "parent_version": parent_version}
+    atomic_json(root / PENDING_FILE, review)
+    return review
+
+
+def print_review(review: dict) -> None:
+    """The whole review, so the conversation shows exactly what gets recorded."""
+    gate = review["gate"]
+    print(f"Review {gate} — show these to the user and ask for confirmation:")
+    for filename in review["artifacts"]:
         print(f"  {filename}")
-    if narration:
-        print("Effective narration: " + json.dumps(narration, ensure_ascii=True))
-    if evidence is not None:
-        print("Effective render: " + json.dumps(proof["context"]["config"], ensure_ascii=True))
-    if designs:
-        print("Teaching design: " + json.dumps(designs, ensure_ascii=True))
+    if review["narration"]:
+        print("Effective narration: "
+              + json.dumps(review["narration"], ensure_ascii=True))
+    if review["evidence"] is not None:
+        print(f"Evidence receipt: {review['evidence']}")
+    if review["designs"]:
+        print("Teaching design: "
+              + json.dumps(review["designs"], ensure_ascii=True))
+    print(f"Then run: user_gates.py --root <集目录> confirm {gate} "
+          f'--note "<用户的确认原话>"')
+
+
+def commit(root: Path, gate: str, note: str) -> None:
+    """Record the staged review. The user confirms in conversation, not in a terminal."""
+    root = root.resolve()
+    note = note.strip()
+    if not note:
+        raise GateError("BLOCKED: --note must quote what the user said")
+    path = root / PENDING_FILE
+    if not path.exists():
+        raise GateError(f"BLOCKED: no staged review in {path}; run approve {gate} first")
     try:
-        answer = input(f"After reviewing them, type CONFIRM {gate}: ")
-    except EOFError:
-        raise GateError("BLOCKED: interactive confirmation required")
-    if answer != f"CONFIRM {gate}":
-        raise GateError("BLOCKED: confirmation cancelled")
-    # The prompt holds no lock; commit only against the parent the user reviewed.
+        review = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise GateError(f"BLOCKED: invalid staged review file: {path}: {exc}")
+    if not isinstance(review, dict) or review.get("gate") != gate:
+        raise GateError(f"BLOCKED: staged review is for "
+                        f"{review.get('gate') if isinstance(review, dict) else '?'}, "
+                        f"not {gate}")
+    print_review(review)
+    print(f"User said: {note}")
+    index = GATES.index(gate)
+    # The conversation carries the delay now; re-check everything it could have moved.
     with file_lock(root / ".user-gates.lock", "approval"):
-        if any(digest(Path(p)) != h for p, h in hashes.items()):
-            raise GateError("BLOCKED: artifact changed during confirmation")
+        for filename, expected in review["artifacts"].items():
+            if digest(Path(filename)) != expected:
+                raise GateError(f"BLOCKED: artifact changed since review: {filename}")
         if index:
             require(root, GATES[index - 1])
         data = load(root)
-        if index and fingerprint(data.get(GATES[index - 1])) != parent_version:
-            raise GateError("BLOCKED: previous approval changed while confirmation waited; confirm again")
-        if evidence is not None:
+        if index and fingerprint(data.get(GATES[index - 1])) != review["parent_version"]:
+            raise GateError(f"BLOCKED: {GATES[index - 1]} changed since review; review again")
+        if review["evidence"] is not None:
+            stage_name = "sample" if gate == "G4" else "render"
+            proof, _ = validate_evidence(Path(review["evidence"]), stage_name)
             require_narration(root, proof["context"])
+            if proof["context"]["key"] != review["render_key"]:
+                raise GateError(f"BLOCKED: {gate} render context differs from the review")
         for name in GATES[index:]:
             data.pop(name, None)
-        data[gate] = {"artifacts": hashes,
-                      "confirmed_at": datetime.now(timezone.utc).isoformat()}
+        data[gate] = {"artifacts": review["artifacts"],
+                      "confirmed_at": datetime.now(timezone.utc).isoformat(),
+                      "note": note}
         if gate == "G3":
-            data[gate]["narration"] = narration
+            data[gate]["narration"] = review["narration"]
         if gate == "G2":
-            data[gate]["teaching_plans"] = [fingerprint(design) for design in designs]
-        if evidence is not None:
-            data[gate].update({"evidence": str(evidence), "render_key": proof["context"]["key"]})
+            data[gate]["teaching_plans"] = review["teaching_plans"]
+        if review["evidence"] is not None:
+            data[gate].update({"evidence": review["evidence"],
+                               "render_key": review["render_key"]})
         atomic_json(root / STATE_FILE, data)
+    path.unlink(missing_ok=True)
     print(f"Recorded {gate}; downstream approvals cleared.")
 
 
-def confirm_preview(root: Path, texts: list[str]) -> None:
+def discard(root: Path, gate: str) -> None:
+    """Drop a staged review the user rejected."""
+    path = (root / PENDING_FILE).resolve()
+    if path.exists():
+        try:
+            review = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError) as exc:
+            raise GateError(f"BLOCKED: invalid staged review file: {path}: {exc}")
+        if isinstance(review, dict) and review.get("gate") != gate:
+            raise GateError(f"BLOCKED: staged review is for {review.get('gate')}, not {gate}")
+        path.unlink()
+        print(f"Discarded staged {gate}.")
+    else:
+        print(f"Nothing staged for {gate}.")
+
+
+def authorize_preview(root: Path, texts: list[str]) -> None:
+    """Record a one-line probe the user allowed in conversation. Not a gate."""
+    root = root.resolve()
     require(root, "G2")
     if len(texts) != 1 or not texts[0].strip() or len(texts[0]) > 100:
         raise GateError("BLOCKED: preview requires one nonempty text, at most 100 characters")
-    try:
-        answer = input("Authorize this one-line TTS request: type CONFIRM PREVIEW: ")
-    except EOFError:
-        raise GateError("BLOCKED: preview confirmation required")
-    if answer != "CONFIRM PREVIEW":
-        raise GateError("BLOCKED: preview cancelled")
+    with file_lock(root / ".user-gates.lock", "preview"):
+        data = load(root)
+        data["preview"] = {"text_sha256": fingerprint(texts[0]),
+                           "confirmed_at": datetime.now(timezone.utc).isoformat()}
+        atomic_json(root / STATE_FILE, data)
+    print("Preview authorized in conversation; G3 is still required before bulk narration.")
+
 
 
 def require_spec(root: Path, spec: dict, mode: str = "standard",
@@ -240,11 +308,17 @@ def main() -> int:
     parser.add_argument("--root", type=Path, required=True,
                         help="Directory holding this episode's inputs and approvals")
     sub = parser.add_subparsers(dest="operation", required=True)
-    approval = sub.add_parser("approve")
+    approval = sub.add_parser("approve", help="Stage a review for the user; records nothing")
     approval.add_argument("gate", choices=GATES)
     approval.add_argument("--artifact", type=Path, action="append", required=True)
     approval.add_argument("--mode", choices=["standard", "fast", "scene"], default="standard",
                           help="G3 使用的配音入口；会展示实际音色、语速及处理配置")
+    confirm = sub.add_parser("confirm", help="Record the staged review after the user answered")
+    confirm.add_argument("gate", choices=GATES)
+    confirm.add_argument("--note", required=True,
+                         help="用户的确认原话；写入审批记录供审计")
+    drop = sub.add_parser("discard", help="Drop a staged review the user rejected")
+    drop.add_argument("gate", choices=GATES)
     check = sub.add_parser("check")
     check.add_argument("gate", choices=GATES)
     check.add_argument("--artifact", type=Path)
@@ -253,7 +327,11 @@ def main() -> int:
     run.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.operation == "approve":
-        approve(args.root, args.gate, args.artifact, args.mode)
+        print_review(stage(args.root, args.gate, args.artifact, args.mode))
+    elif args.operation == "confirm":
+        commit(args.root, args.gate, args.note)
+    elif args.operation == "discard":
+        discard(args.root, args.gate)
     elif args.operation == "check":
         require(args.root, args.gate, args.artifact)
         print(f"PASS: {args.gate}")

@@ -12,7 +12,7 @@ from audio_timing import pad_scene, silent_scene
 from narration_cache import get_audio
 from narration_runs import NarrationRun, relative
 from production import inspection_report, read_spec, read_spec_snapshot, spoken_text
-from user_gates import GateError, confirm_preview, require, require_spec_snapshot
+from user_gates import GateError, authorize_preview, require, require_spec_snapshot
 
 try:
     import edge_tts
@@ -56,7 +56,7 @@ def _prepare(spec: dict | Path, root: Path | None, mode: str,
     if preview:
         texts = [spoken_text(scene, "text") for scene in document["scenes"]]
         print(f"Preview: voice={config['voice']}, rate={config['rate']}, texts={texts}")
-        confirm_preview(root, texts)
+        authorize_preview(root, texts)
     return _Input(root, source, source_sha256, document, config)
 
 

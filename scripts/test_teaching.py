@@ -56,13 +56,19 @@ class TeachingTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["teaching_plan"][0]["role"], "rule")
         self.assertFalse((self.root / "audio").exists())
 
+    def approve_and_confirm(self, gate, artifact):
+        staged = self.cli("user_gates.py", "--root", self.root, "approve", gate,
+                          "--artifact", artifact)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        result = self.cli("user_gates.py", "--root", self.root, "confirm", gate,
+                          "--note", f"用户确认 {gate}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_changed_design_requires_g2_again_before_tts(self):
         self.approvals()
         self.spec["scenes"][0]["visual"]["change"] = "a different explanation"
         self.save()
-        result = self.cli("user_gates.py", "--root", self.root, "approve", "G3",
-                          "--artifact", self.path, input_text="CONFIRM G3\n")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.approve_and_confirm("G3", self.path)
         result = self.cli("build_narration.py", self.path)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("G2", result.stderr)
@@ -72,9 +78,7 @@ class TeachingTests(unittest.TestCase):
         self.approvals()
         self.spec["scenes"][0]["regions"][0]["annotation"] = "a different lesson"
         self.save()
-        result = self.cli("user_gates.py", "--root", self.root, "approve", "G3",
-                          "--artifact", self.path, input_text="CONFIRM G3\n")
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.approve_and_confirm("G3", self.path)
         result = self.cli("build_narration.py", self.path)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("G2", result.stderr)
@@ -107,9 +111,7 @@ class TeachingTests(unittest.TestCase):
         design = self.root / "design.json"
         design.write_text(preview.stdout, encoding="utf-8")
         for gate, source in (("G0", note), ("G1", note), ("G2", design), ("G3", self.path)):
-            result = self.cli("user_gates.py", "--root", self.root, "approve", gate,
-                              "--artifact", source, input_text=f"CONFIRM {gate}\n")
-            self.assertEqual(result.returncode, 0, result.stderr)
+            self.approve_and_confirm(gate, source)
 
     def run_narration(self):
         with patch.object(sys, "argv", ["build_narration", str(self.path)]), \
