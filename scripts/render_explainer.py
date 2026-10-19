@@ -28,8 +28,8 @@ import tempfile
 from pathlib import Path
 
 from artifacts import atomic_bytes, atomic_json, file_digest, file_lock
+from boards import board_canvas, board_image
 from check_assignment import audit
-from production import board_canvas, board_image
 from render_contract import QUALITY, RenderReceipt, frame_duration, render_config, scene_key, snapshot, verify_video
 from user_gates import GateError, require, require_render, require_teaching, require_narration
 
@@ -382,13 +382,16 @@ def produce(args, receipt: RenderReceipt) -> dict:
         canvas = board_canvas(root / plan["scenes"][0]["image"])
     config = render_config(args.quality, name,
                            args.fps if args.fps is not None else plan.get("fps"), canvas)
-    with receipt.check("inputs"):
+    with receipt.check("inputs") as detail:
         context = snapshot(plan_path, plan, config)
         if not args.dry_run:
             require_narration(root, context)
+        detail["method"] = "snapshot: 输入结构校验 + 素材/配置/实现指纹"
+        detail["evidence"] = f"key={context['key']}, scenes={len(context['scenes'])}"
     receipt.bind(context)
     if args.dry_run:
-        return {"status": "PASS", "stage": "PREFLIGHT", "context": context, "checks": receipt.checks}
+        return {"status": "PASS", "stage": "PREFLIGHT", "context": context,
+                "checks": receipt.checks, "check_evidence": receipt.check_evidence}
     if not args.only:
         require_render(root, context["key"])
     with receipt.check("assignment"):
@@ -405,7 +408,7 @@ def produce(args, receipt: RenderReceipt) -> dict:
         if not args.only and output.exists() and not args.force:
             raise ValueError("Output already exists; choose another output or explicitly use --force")
         with receipt.run(root, only=args.only) as workspace:
-            with receipt.check("render"):
+            with receipt.check("render") as detail:
                 parts = []
                 for scene in scenes:
                     facts: dict = {}
@@ -415,6 +418,8 @@ def produce(args, receipt: RenderReceipt) -> dict:
                     parts.append(part)
                 movie = workspace / "video.mp4"
                 concatenate(parts, movie)
+                detail["method"] = "whiteboard_animator 逐拍渲染 + ffmpeg concat"
+                detail["evidence"] = f"scenes={len(parts)}"
             result = receipt.video(movie)
             frames = []
             if args.only:

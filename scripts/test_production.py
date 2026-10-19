@@ -55,6 +55,7 @@ class ProductionTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["config"]["voice"], "zh-CN-XiaoyiNeural")
         self.assertEqual(report["config"]["rate"], "+15%")
+        self.assertEqual(report["config"]["text_version"], 2)
         self.assertEqual(report["status"], "PASS")
         self.assertFalse((self.root / "audio").exists())
         self.assertFalse((self.root / "plan.json").exists())
@@ -145,7 +146,7 @@ class ProductionTests(unittest.TestCase):
         with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)):
             self.run_narration()
             self.assertEqual(len(requests), 2)
-            self.assertEqual(requests[0], ("a_b", "zh-CN-XiaoyiNeural", "+15%"))
+            self.assertEqual(requests[0], ("a b", "zh-CN-XiaoyiNeural", "+15%"))
             self.spec["scenes"][0]["regions"][0]["spoken_text"] = "A B"
             self.save()
             self.approve()

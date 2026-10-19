@@ -409,6 +409,35 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(len(receipts), 1)
         self.assertEqual(json.loads(receipts.pop().read_text())["status"], "FAIL")
 
+    def test_mixed_cue_modes_report_fail_but_stay_approvable(self):
+        self.plan["scenes"][0]["regions"] = [{
+            "label": "exact", "box": [0, 0, 100, 100], "start": 0, "end": 0.4,
+        }]
+        self.plan["scenes"].append({
+            "id": "s02", "image": "board.png", "duration": 0.5,
+            "regions": [{"label": "est", "box": [0, 0, 100, 100], "annotation": "x"}],
+        })
+        self.save()
+        sample = self.report(self.render("--only", "s01"))
+        self.assertEqual(sample["checks"]["cue"], "FAIL")
+        proof = json.loads(Path(sample["receipt"]).read_text())
+        self.assertEqual(proof["status"], "PASS")
+        self.assertEqual(proof["check_evidence"]["cue"]["run"], proof["context"]["key"])
+        self.assertTrue(proof["check_evidence"]["cue"]["method"])
+        self.assertIn("s02=estimated", proof["check_evidence"]["cue"]["evidence"])
+        self.approve("G4", Path(sample["receipt"]))
+
+    def test_pass_receipt_records_run_method_and_evidence_per_check(self):
+        sample = self.report(self.render("--only", "s01"))
+        proof = json.loads(Path(sample["receipt"]).read_text())
+        for name, state in proof["checks"].items():
+            if state == "NOTRUN":
+                continue
+            entry = proof["check_evidence"][name]
+            self.assertEqual(entry["run"], proof["context"]["key"], name)
+            self.assertTrue(entry["method"], name)
+            self.assertTrue(entry["evidence"], name)
+
     def test_receipt_consumers_reject_check_and_artifact_contract_changes(self):
         import user_gates
         sample = self.report(self.render("--only", "s01"))
@@ -419,6 +448,12 @@ class VideoTests(unittest.TestCase):
             proof = copy.deepcopy(original)
             proof["checks"][name] = state
             mutations.append(proof)
+        proof = copy.deepcopy(original)
+        del proof["check_evidence"]
+        mutations.append(proof)
+        proof = copy.deepcopy(original)
+        proof["check_evidence"]["media"]["evidence"] = ""
+        mutations.append(proof)
         proof = copy.deepcopy(original)
         proof["artifacts"].pop()
         mutations.append(proof)

@@ -143,7 +143,7 @@ python scripts/gen_tts.py preview.yaml --preview --out-dir preview_audio
 | 3 | `zh-CN-XiaoxiaoNeural` | 明亮女声 | 偏活泼 |
 | 4 | `zh-CN-YunyangNeural` | 播音男声 | 偏正式 |
 
-语速（与 `build_narration_fast` / wrapper 一致）：
+语速（写入 `plan.build.json` 的 `rate`，与配音有效配置一致）：
 
 | 编号 | rate | 后果 |
 |---|---|---|
@@ -186,7 +186,7 @@ python scripts/gen_tts.py preview.yaml --preview --out-dir preview_audio
 请回复例如：`音色 1 + 语速 A`。
 ```
 
-把选定的 `voice` / rate 写入 `plan.build.json` 的 `voice` 字段（及项目内 TTS wrapper），再跑配音。
+把选定的 `voice` / rate 写入 `plan.build.json` 再跑配音；自定义配音程序用 `run tts` 包裹并沿用同一配置。
 
 ---
 

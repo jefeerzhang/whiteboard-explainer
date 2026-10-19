@@ -5,7 +5,7 @@ import uuid
 import json
 from pathlib import Path
 
-from artifacts import atomic_json, file_digest, fingerprint, relative
+from artifacts import SHARED_IMPLEMENTATION, atomic_json, file_digest, fingerprint, relative
 from media import verify
 
 
@@ -48,9 +48,9 @@ class NarrationRun:
         self.images = {s["id"]: root / s["image"] for s in spec["scenes"] if s.get("image")}
         implementation = {
             name: file_digest(Path(__file__).with_name(name))
-            for name in ("production.py", "media.py", "narration_cache.py",
-                         "narration_runs.py", "narration_production.py", "build_narration.py", "gen_tts.py",
-                         "teaching.py", "audio_timing.py")
+            for name in (*SHARED_IMPLEMENTATION, "narration_cache.py", "narration_runs.py",
+                         "narration_production.py", "build_narration.py",
+                         "build_narration_fast.py", "gen_tts.py")
         }
         inputs = {
             "source": str(source.resolve()), "source_sha256": source_sha256, "config": config,

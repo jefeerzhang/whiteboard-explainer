@@ -47,6 +47,7 @@ python <skill>/scripts/gen_tts.py narration.json --out-dir audio/narration
 - 场景配音支持原有 `speed`；未写 `rate` 时折算为百分比。有效值会在预检与审批时展示。
 - 改稿、换声、改语速或切换处理配置后，须重新确认 G3。旧版没有有效配置快照的 G3 会被拒绝，不能自动补签。
 - region 的 `annotation`、scene 的 `text` 保留画面原文。可用 `spoken_text` 明确指定实际口播；缓存按实际提交文本判定。
+- TTS 输入端统一应用已确认读法预处理，版本由有效配置的 `text_version` 记录：版本 2 把 `_` 转为空格并归并空白；画面文本与源讲稿不被修改。
 - 单句 `--preview` 仍要求已过 G2，且须先在对话中单独获用户授权；最多一条、100 字，按实际 `spoken_text` 检查。授权写入 `.user-gates.json` 的 `preview` 节，不通过 G3。
 - 本轮可靠性保证限于上述内置 CLI。外部 apiz 命令和自定义 monkey-patch 后端不自动获得相同缓存与配置契约。
 

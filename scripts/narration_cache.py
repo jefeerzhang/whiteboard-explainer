@@ -9,6 +9,7 @@ from pathlib import Path
 
 from artifacts import atomic_bytes, atomic_json, file_digest, fingerprint
 from media import verify
+from production import tts_input
 
 
 VERSION = 1
@@ -36,6 +37,8 @@ def publish(source: Path, target: Path, key: str) -> dict:
 
 
 async def get_audio(text: str, config: dict, store: Path, synthesize) -> tuple[Path, float, dict]:
+    # 已确认读法预处理只作用于 TTS 输入；缓存按实际提交文本判定
+    text = tts_input(text, config["text_version"])
     raw_key = fingerprint({
         "version": VERSION, "text": text,
         **{key: config[key] for key in

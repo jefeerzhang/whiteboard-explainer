@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from artifacts import atomic_bytes, atomic_json, file_digest, fingerprint, relative
+from artifacts import SHARED_IMPLEMENTATION, atomic_bytes, atomic_json, file_digest, fingerprint, relative
 from media import verify
 from narration_runs import read_run
 from production import normalize_canvas, positive, read_spec, validate_spec
@@ -43,10 +43,9 @@ def implementation() -> dict:
     return {
         "engine": version("whiteboard-animator"),
         "files": {str(path): file_digest(path) for path in [
-            scripts / "render_explainer.py", scripts / "render_contract.py",
-            scripts / "check_assignment.py", scripts / "media.py",
-            scripts / "production.py", scripts / "teaching.py",
-            scripts / "artifacts.py", scripts / "audio_timing.py", scripts / "narration_runs.py",
+            *(scripts / name for name in (*SHARED_IMPLEMENTATION,
+                  "render_explainer.py", "render_contract.py", "check_assignment.py",
+                  "boards.py", "narration_runs.py")),
             root / "lib/theme.py", root / "lib/themed_render.py",
         ]},
     }
@@ -129,6 +128,15 @@ def snapshot(path: Path, plan: dict, config: dict) -> dict:
     return {"key": fingerprint(value), **value}
 
 
+def cue_state(scenes: list) -> str:
+    """cue 状态：全部有 region 的拍都是精确 cue 才 PASS；无显式 cue 记 SKIP；
+    部分拍精确、部分拍估算记 FAIL，不宣称整体精确对齐。"""
+    modes = [s["cue_mode"] for s in scenes if s["regions"]]
+    if not any(mode == "exact" for mode in modes):
+        return "SKIP"
+    return "PASS" if all(mode == "exact" for mode in modes) else "FAIL"
+
+
 def check_snapshot(context: dict) -> None:
     if context.get("key") != fingerprint({k: v for k, v in context.items() if k != "key"}):
         raise ValueError("Render snapshot is malformed")
@@ -155,13 +163,21 @@ def verify_video(path: Path, config: dict, audio: bool) -> dict:
 def _receipt_contract(proof: dict, stage: str, base: Path) -> None:
     if stage not in ("sample", "render"):
         raise ValueError("Unknown render receipt stage")
-    if proof.get("schema") != 1 or proof.get("stage") != stage or proof.get("status") != "PASS":
+    if proof.get("schema") != 2 or proof.get("stage") != stage or proof.get("status") != "PASS":
         raise ValueError(f"A completed {stage} receipt is required")
     context = proof["context"]
     checks = proof["checks"]
     for name in ("inputs", "render", "media", "duration"):
         if checks.get(name) != "PASS":
             raise ValueError(f"Required {name} check did not pass")
+    details = proof.get("check_evidence")
+    for name, state in checks.items():
+        if state == "NOTRUN":
+            continue
+        entry = details.get(name) if isinstance(details, dict) else None
+        if (not isinstance(entry, dict) or entry.get("run") != context.get("key")
+                or not entry.get("method") or not entry.get("evidence")):
+            raise ValueError(f"Check {name} is missing its run, method or evidence")
     selected = proof["scenes"]
     available = [s["id"] for s in context["scenes"]]
     if (not selected or len(selected) != len(set(selected))
@@ -169,8 +185,7 @@ def _receipt_contract(proof: dict, stage: str, base: Path) -> None:
         raise ValueError("Receipt has an invalid scene selection")
     if stage == "render" and selected != available:
         raise ValueError("A partial scene receipt cannot approve final delivery")
-    cue_state = "PASS" if any(s["cue_mode"] == "exact" for s in context["scenes"]) else "SKIP"
-    if checks.get("cue") != cue_state:
+    if checks.get("cue") != cue_state(context["scenes"]):
         raise ValueError("Cue check is missing or inconsistent")
     assignment = checks.get("assignment")
     needs_assignment = any(s["regions"] for s in context["scenes"])
@@ -234,6 +249,7 @@ class RenderReceipt:
     def __init__(self):
         self._checks = {name: "NOTRUN" for name in
                         ("inputs", "assignment", "cue", "render", "media", "duration")}
+        self._evidence: dict[str, dict] = {}
         self._phase = "PREFLIGHT"
         self._context: dict = {}
         self._proof: dict = {}
@@ -244,6 +260,11 @@ class RenderReceipt:
     def checks(self) -> dict:
         return dict(self._checks)
 
+    @property
+    def check_evidence(self) -> dict:
+        run = self._context.get("key")
+        return {name: {"run": run, **detail} for name, detail in self._evidence.items()}
+
     @contextmanager
     def check(self, name: str):
         if name not in self._checks:
@@ -251,23 +272,45 @@ class RenderReceipt:
         self._checks[name] = "FAIL"
         if name == "render":
             self._phase = "RENDER"
-        yield
-        self._checks[name] = "PASS"
-        if name == "render":
-            self._phase = "VERIFY"
+        detail = {"method": "", "evidence": ""}
+        try:
+            yield detail
+        except BaseException as exc:
+            if not detail["evidence"]:
+                detail["evidence"] = str(exc)
+            raise
+        else:
+            self._checks[name] = "PASS"
+            if name == "render":
+                self._phase = "VERIFY"
+        finally:
+            if detail["method"] or detail["evidence"]:
+                self._evidence[name] = {key: value
+                                        for key, value in detail.items() if value}
 
     def bind(self, context: dict) -> None:
         self._context = context
-        self._checks["cue"] = ("PASS" if any(s["cue_mode"] == "exact"
-                                             for s in context["scenes"]) else "SKIP")
+        self._checks["cue"] = cue_state(context["scenes"])
+        modes = ", ".join(f"{s['id']}={s['cue_mode']}"
+                          for s in context["scenes"] if s["regions"])
+        self._evidence["cue"] = {
+            "method": "snapshot 的 cue_mode（exact/estimated/uniform）",
+            "evidence": modes or "无 region",
+        }
 
     def assignment(self, result: dict) -> None:
         state = result["state"]
         if state not in ("PASS", "FAIL", "SKIP"):
             raise ValueError("Assignment check returned an invalid state")
         self._checks["assignment"] = state
+        unassigned = result.get("unassigned") or []
+        self._evidence["assignment"] = {
+            "method": "check_assignment.audit",
+            "evidence": (f"unassigned={unassigned}" if unassigned
+                         else "无未归属组件" if state == "PASS" else "无 region 可归属"),
+        }
         if state == "FAIL":
-            raise ValueError(f"Unassigned components: {result['unassigned']}")
+            raise ValueError(f"Unassigned components: {unassigned}")
 
     @contextmanager
     def run(self, root: Path, *, only: str | None = None):
@@ -280,7 +323,7 @@ class RenderReceipt:
             raise ValueError("--only does not match a scene")
         self._workspace = root / ".render-runs" / context["key"] / uuid.uuid4().hex
         self._workspace.mkdir(parents=True, exist_ok=False)
-        self._proof = {"schema": 1, "stage": stage, "status": "FAIL", "context": context,
+        self._proof = {"schema": 2, "stage": stage, "status": "FAIL", "context": context,
                        "scenes": selected, "artifacts": [],
                        "video_cache": {"generated": 0, "reused": 0}}
         try:
@@ -297,12 +340,22 @@ class RenderReceipt:
 
     def video(self, movie: Path) -> dict:
         context = self._context
-        with self.check("media"):
+        with self.check("media") as detail:
             result = verify_video(movie, context["config"], context["audio"])
-        with self.check("duration"):
+            detail["method"] = "verify_video: ffprobe 元数据 + ffmpeg 完整解码"
+            detail["evidence"] = (f"duration={result['duration']:.3f}s, "
+                                  f"fps={result['video']['fps']}, "
+                                  f"{result['video']['width']}x{result['video']['height']}")
+        with self.check("duration") as detail:
             _check_duration(result, context, self._proof["scenes"])
-        with self.check("inputs"):
+            detail["method"] = "分拍时长求和并与实际解码时长比对"
+            expected = sum(s["duration"] for s in context["scenes"]
+                           if s["id"] in self._proof["scenes"])
+            detail["evidence"] = f"expected={expected:.3f}s, actual={result['duration']:.3f}s"
+        with self.check("inputs") as detail:
             check_snapshot(context)
+            detail["method"] = "check_snapshot: 资源/实现指纹与引擎版本复核"
+            detail["evidence"] = f"key={context['key']}"
         assert self._workspace is not None
         role = "sample" if self._proof["stage"] == "sample" else "video"
         self._proof["artifacts"].append(_artifact(role, movie, self._workspace))
@@ -325,10 +378,13 @@ class RenderReceipt:
         if output is not None:
             artifacts.append({"role": "delivery", "path": relative(output, self._workspace),
                               "sha256": artifacts[0]["sha256"]})
-        proof = {**self._proof, "status": "PASS", "checks": self.checks, "artifacts": artifacts}
+        proof = {**self._proof, "status": "PASS", "checks": self.checks,
+                 "check_evidence": self.check_evidence, "artifacts": artifacts}
         _receipt_contract(proof, stage, self._workspace)
-        with self.check("inputs"):
+        with self.check("inputs") as detail:
             check_snapshot(self._context)
+            detail["method"] = "check_snapshot: 资源/实现指纹与引擎版本复核"
+            detail["evidence"] = f"key={self._context['key']}"
         if output is not None:
             atomic_bytes(output, self._movie.read_bytes())
             artifacts[-1] = _artifact("delivery", output, self._workspace)
@@ -337,12 +393,14 @@ class RenderReceipt:
         receipt = self._write("PASS")
         return {"status": "PASS", "stage": stage, "receipt": str(receipt),
                 "output": str(output if output is not None else self._movie),
-                "checks": self.checks, "video_cache": dict(self._proof["video_cache"])}
+                "checks": self.checks, "check_evidence": self.check_evidence,
+                "video_cache": dict(self._proof["video_cache"])}
 
     def _write(self, status: str) -> Path:
         assert self._workspace is not None
         receipt = self._workspace / f"{self._proof['stage']}.json"
-        atomic_json(receipt, {**self._proof, "status": status, "checks": self.checks})
+        atomic_json(receipt, {**self._proof, "status": status, "checks": self.checks,
+                              "check_evidence": self.check_evidence})
         self._proof["status"] = status
         return receipt
 
@@ -351,5 +409,5 @@ class RenderReceipt:
             self._checks["cue"] = "FAIL"
         if self._checks["inputs"] == "NOTRUN" and not blocked:
             self._checks["inputs"] = "FAIL"
-        return {"status": "FAIL", "stage": self._phase,
-                "checks": self.checks, "error": str(error)}
+        return {"status": "FAIL", "stage": self._phase, "checks": self.checks,
+                "check_evidence": self.check_evidence, "error": str(error)}

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from whiteboard_animator import WhiteboardAnimator
-from production import board_image
+from boards import board_image
 
 
 def region_boxes(region, sw, sh):

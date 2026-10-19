@@ -71,8 +71,8 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 | SKIP | 明确不适用，例如没有 region 时的组件归属 |
 | NOTRUN | 未执行，包含前置阶段失败导致后续未运行 |
 
-`REPORT.checks` 包含输入、组件归属、cue、渲染、媒体、时长。
-无显式 cue 时，cue 状态为 SKIP；方案记录 estimated 或 uniform，不宣称精确语音对齐。
+`REPORT.checks` 包含输入、组件归属、cue、渲染、媒体、时长；`REPORT.check_evidence` 记录每项已执行检查的运行标识、检查方法与证据。
+无显式 cue 时，cue 状态为 SKIP；全部有 region 的拍都是精确 cue 才记 PASS；部分拍估算时记 FAIL，不宣称整体精确对齐。
 有显式 cue 时检查有限值、起止配对及场景边界；精确 cue 渲染失败不会悄悄放宽时间窗。
 失败按 PREFLIGHT、RENDER、VERIFY 阶段返回非零码，后续检查保留 NOTRUN。
 回执是技术证据，不等于所有可感知音画同步或教学语义已经自动验证。
@@ -146,7 +146,7 @@ python <skill>/scripts/user_gates.py --root . confirm G2 --note "讲稿确认，
 
 - 检查开始时记为 `FAIL`，正常返回后才记为 `PASS`；未开始的后续检查保持 `NOTRUN`。归属与 cue 的 `SKIP` 仍按完整方案判定。
 - 运行视频必须通过实际解码、画幅、帧率和时长校验。完成回执前再次核对输入快照，转换产物相对路径并检查对应阶段的完整性。
-- 回执继续使用 schema 1，CLI 参数与 `REPORT` 字段沿用原有约定。代码修改仍按既有实现指纹机制使旧方案失效，不自动补签 G4/G5。
+- 回执使用 schema 2：除检查状态外，每项已执行检查附运行标识、检查方法与证据（`check_evidence`）。schema 1 回执缺少这些字段，须重新生成样片并确认，不自动补签 G4/G5。代码修改仍按既有实现指纹机制使旧方案失效。
 - 写入 `PASS` 回执失败时，仅尝试保存 `FAIL` 回执；若失败回执也无法写入，异常继续向上传递，不报告成功。当前输出的原子替换失败时，旧输出保持不变。
 - 审批与独立媒体验收仍调用 `validate_evidence()`。该入口消费相同结构约束，但重新读取文件、核对哈希并完整解码，不把写端的 `PASS` 当作复验结果。
 

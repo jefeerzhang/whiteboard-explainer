@@ -15,6 +15,13 @@ else:
     import fcntl
 
 
+# 配音与渲染运行指纹共用的实现文件；新增共享 module 时同步这里
+SHARED_IMPLEMENTATION = (
+    "artifacts.py", "audio_timing.py", "media.py", "production.py",
+    "teaching.py", "user_gates.py",
+)
+
+
 def fingerprint(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=True,
                                      separators=(",", ":"), allow_nan=False).encode()).hexdigest()

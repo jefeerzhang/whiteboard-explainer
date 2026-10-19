@@ -48,6 +48,18 @@ def read_spec_snapshot(path: Path) -> tuple[dict, str]:
     return spec, digest
 
 
+TEXT_VERSION = 2
+
+
+def tts_input(text: str, version: int) -> str:
+    """Confirmed read-aloud preprocessing applied only at the TTS input boundary."""
+    if version == 1:
+        return text
+    if version == 2:
+        return " ".join(text.replace("_", " ").split())
+    raise ValueError(f"Unsupported text preprocessing version: {version}")
+
+
 def narration_config(spec: dict, mode: str = "standard", rate: str | None = None) -> dict:
     default_voice = "zh-CN-YunxiNeural"
     if mode == "scene":
@@ -58,6 +70,9 @@ def narration_config(spec: dict, mode: str = "standard", rate: str | None = None
         if not math.isfinite(speed):
             raise ValueError("speed must be finite")
         default_rate = f"{int(round((speed - 1) * 100)):+d}%"
+    text_version = spec.get("text_version", TEXT_VERSION)
+    if isinstance(text_version, bool) or text_version not in (1, 2):
+        raise ValueError("text_version must be 1 or 2")
     try:
         sdk_version = version("edge-tts")
     except PackageNotFoundError:
@@ -69,7 +84,7 @@ def narration_config(spec: dict, mode: str = "standard", rate: str | None = None
         "voice": spec.get("voice", default_voice),
         "rate": rate or spec.get("rate", default_rate),
         "trim": mode == "fast",
-        "text_version": 1,
+        "text_version": text_version,
         "sdk_version": sdk_version,
     }
     if config["provider"] != "edge" or config["model"] != "edge-tts":
@@ -98,23 +113,6 @@ def normalize_canvas(value) -> list[int]:
                    or not 2 <= v <= 1280 or v % 2 for v in value)):
         raise ValueError("canvas needs two even dimensions within 2..1280")
     return value
-
-
-def board_canvas(path: Path) -> list[int]:
-    with Image.open(path) as image:
-        width, height = image.size
-    scale = min(1.0, 1280 / max(width, height))
-    return [max(2, int(width * scale) // 2 * 2), max(2, int(height * scale) // 2 * 2)]
-
-
-def board_image(path: Path, canvas: list[int] | None = None):
-    with Image.open(path) as image:
-        rgba = image.convert("RGBA")
-        flat = Image.alpha_composite(Image.new("RGBA", rgba.size, "white"), rgba).convert("RGB")
-    if canvas is not None:
-        normalize_canvas(canvas)
-        flat = flat.resize((canvas[0], canvas[1]), Image.Resampling.LANCZOS)
-    return flat
 
 
 def spoken_text(region: dict, source: str = "annotation") -> str:
