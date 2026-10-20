@@ -9,9 +9,10 @@ from pathlib import Path
 
 from artifacts import atomic_bytes, atomic_json, file_lock
 from audio_timing import pad_scene, silent_scene
+from media import concat_manifest
 from narration_cache import get_audio
 from narration_runs import NarrationRun, relative
-from production import inspection_report, read_spec, read_spec_snapshot, spoken_text
+from production import inspection_report, load_spec, load_spec_and_hash, spoken_text
 from user_gates import GateError, authorize_preview, require, require_spec_snapshot
 
 try:
@@ -38,7 +39,7 @@ def _prepare(spec: dict | Path, root: Path | None, mode: str,
         root = source.parent
         if not preview:
             require(root, "G3", source)
-        document, source_sha256 = read_spec_snapshot(source)
+        document, source_sha256 = load_spec_and_hash(source)
     else:
         if root is None:
             raise ValueError("A project root is required for a parsed narration input")
@@ -67,7 +68,7 @@ async def produce_regions(spec: dict | Path, root: Path | None = None, *,
     if dry:
         if isinstance(spec, Path):
             root = spec.resolve().parent
-            spec = read_spec(spec)
+            spec = load_spec(spec)
         if root is None:
             raise ValueError("A project root is required for a parsed narration input")
         report = inspection_report(spec, root, mode, rate)
@@ -186,9 +187,7 @@ def make_gap(out_dir: Path, seconds: float) -> Path:
 
 
 def concat(parts: list[Path], out: Path) -> None:
-    lst = out.parent / (out.name + ".concat.txt")
-    escaped = [p.resolve().as_posix().replace("'", "'\\''") for p in parts]
-    lst.write_text("".join(f"file '{p}'\n" for p in escaped), encoding="utf-8")
+    lst = concat_manifest(parts, out)
     run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
          "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(out)])
     lst.unlink()

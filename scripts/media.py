@@ -57,3 +57,12 @@ def verify(path: Path, *, kind: str | None = None, decode: bool = True) -> dict:
             raise ValueError("Video has an invalid frame rate or dimensions")
         result_data["video"] = {"fps": fps, "width": int(video["width"]), "height": int(video["height"])}
     return result_data
+
+
+def concat_manifest(parts: list[Path], target: Path) -> Path:
+    """ffmpeg concat demuxer manifest beside the output; the caller deletes it."""
+    manifest = target.parent / (target.name + ".concat.txt")
+    manifest.write_text("".join(
+        "file '" + p.resolve().as_posix().replace("'", "'\\''") + "'\n"
+        for p in parts), encoding="utf-8")
+    return manifest

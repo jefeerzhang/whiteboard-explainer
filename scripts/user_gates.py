@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from artifacts import atomic_json, file_digest, file_lock, fingerprint
-from production import narration_config, read_document, read_document_snapshot
+from production import (CAPABILITIES, capability_check, narration_config,
+                        load_document, load_document_and_hash)
 from render_contract import validate_evidence
 from teaching import artifact_design, teaching_plan
 
@@ -26,9 +27,6 @@ ACTIONS = {"boards": "G2", "tts": "G3", "sample": "G3",
 
 class GateError(SystemExit):
     pass
-
-
-digest = file_digest
 
 
 def load(root: Path) -> dict:
@@ -64,7 +62,7 @@ def require(root: Path, gate: str, artifact: Path | None = None) -> None:
                 raise GateError(f"BLOCKED: {name} evidence is missing, stale or invalid: {exc}")
         try:
             for filename, expected in record["artifacts"].items():
-                if digest(Path(filename)) != expected:
+                if file_digest(Path(filename)) != expected:
                     raise GateError(f"BLOCKED: {name} artifact changed: {filename}")
         except (OSError, TypeError, AttributeError) as exc:
             raise GateError(f"BLOCKED: {name} approval cannot be verified: {exc}")
@@ -74,10 +72,17 @@ def require(root: Path, gate: str, artifact: Path | None = None) -> None:
             raise GateError(f"BLOCKED: {gate} does not approve this input: {filename}")
 
 
-def stage(root: Path, gate: str, artifacts: list[Path],
-          mode: str = "standard") -> dict:
+def stage_review(root: Path, gate: str, artifacts: list[Path],
+                 mode: str = "standard", capabilities: list[str] | None = None) -> dict:
     """Freeze what the user must review. Writes nothing to the approval file."""
     root = root.resolve()
+    # Single pending slot: refuse a competing producer instead of losing its review.
+    with file_lock(root / ".user-gates.lock", "approval"):
+        return _stage(root, gate, artifacts, mode, capabilities)
+
+
+def _stage(root: Path, gate: str, artifacts: list[Path],
+           mode: str = "standard", capabilities: list[str] | None = None) -> dict:
     index = GATES.index(gate)
     if index:
         require(root, GATES[index - 1])
@@ -91,8 +96,8 @@ def stage(root: Path, gate: str, artifacts: list[Path],
         try:
             stage_name = "sample" if gate == "G4" else "render"
             candidates = [p for p in files if p.suffix.lower() == ".json"
-                          and isinstance(read_document(p), dict)
-                          and read_document(p).get("stage") == stage_name]
+                          and isinstance(load_document(p), dict)
+                          and load_document(p).get("stage") == stage_name]
             if len(candidates) != 1:
                 raise ValueError(f"{gate} requires exactly one {stage_name} receipt")
             evidence = candidates[0]
@@ -109,7 +114,7 @@ def stage(root: Path, gate: str, artifacts: list[Path],
     # Bind referenced boards/audio too, not just the JSON pointing at them.
     for path in list(files):
         if path.suffix.lower() in (".json", ".yaml", ".yml"):
-            content, parsed_hashes[str(path)] = read_document_snapshot(path)
+            content, parsed_hashes[str(path)] = load_document_and_hash(path)
             if path == evidence and fingerprint(content) != fingerprint(proof):
                 raise GateError("BLOCKED: render evidence changed while its snapshot was read")
             if isinstance(content, dict):
@@ -125,13 +130,24 @@ def stage(root: Path, gate: str, artifacts: list[Path],
                     for key in ("image", "audio"):
                         if scene.get(key):
                             files.add((path.parent / scene[key]).resolve())
-    hashes = {str(p): parsed_hashes[str(p)] if str(p) in parsed_hashes else digest(p)
+    hashes = {str(p): parsed_hashes[str(p)] if str(p) in parsed_hashes else file_digest(p)
               for p in sorted(files)}
+    checks = {}
+    for name in capabilities or []:
+        if gate != "G0":
+            raise GateError("BLOCKED: capability preflight belongs to G0")
+        if name not in CAPABILITIES:
+            raise GateError(f"BLOCKED: unknown capability {name}; choose from {CAPABILITIES}")
+        try:
+            checks[name] = capability_check(name)
+        except ValueError as exc:
+            raise GateError(f"BLOCKED: {name} local preflight failed: {exc}")
     review = {"gate": gate, "artifacts": hashes, "narration": narration,
               "teaching_plans": [fingerprint(design) for design in designs],
               "designs": designs,
               "evidence": str(evidence) if evidence else None,
               "render_key": proof["context"]["key"] if proof else None,
+              "capabilities": checks,
               "parent_version": parent_version}
     atomic_json(root / PENDING_FILE, review)
     return review
@@ -148,6 +164,9 @@ def print_review(review: dict) -> None:
               + json.dumps(review["narration"], ensure_ascii=True))
     if review["evidence"] is not None:
         print(f"Evidence receipt: {review['evidence']}")
+    if review.get("capabilities"):
+        print("Capability preflight: "
+              + json.dumps(review["capabilities"], ensure_ascii=True))
     if review["designs"]:
         print("Teaching design: "
               + json.dumps(review["designs"], ensure_ascii=True))
@@ -155,7 +174,7 @@ def print_review(review: dict) -> None:
           f'--note "<用户的确认原话>"')
 
 
-def commit(root: Path, gate: str, note: str) -> None:
+def commit_review(root: Path, gate: str, note: str) -> None:
     """Record the staged review. The user confirms in conversation, not in a terminal."""
     root = root.resolve()
     note = note.strip()
@@ -174,11 +193,36 @@ def commit(root: Path, gate: str, note: str) -> None:
                         f"not {gate}")
     print_review(review)
     print(f"User said: {note}")
+    _record(root, gate, review, note)
+    path.unlink(missing_ok=True)
+    print(f"Recorded {gate}; downstream approvals cleared.")
+
+
+def exempt(root: Path, gate: str, artifacts: list[Path], scopes: list[str],
+           note: str, mode: str = "standard") -> None:
+    """Record a user-declared exemption. The gate binds artifacts and typed
+    evidence exactly like a confirmation; only the waived scope is listed.
+    Technical checks cannot be exempted."""
+    root = root.resolve()
+    scopes = [s.strip() for s in scopes]
+    if not scopes or any(not s for s in scopes):
+        raise GateError("BLOCKED: exempt requires --scope entries naming what is waived")
+    review = stage_review(root, gate, artifacts, mode)
+    _record(root, gate, review, note, exempted=scopes)
+    (root / PENDING_FILE).unlink(missing_ok=True)
+    print(f"Recorded {gate} exemption: {scopes}; downstream approvals cleared.")
+
+
+def _record(root: Path, gate: str, review: dict, note: str,
+            exempted: list[str] | None = None) -> None:
+    note = note.strip()
+    if not note:
+        raise GateError("BLOCKED: --note must quote what the user said")
     index = GATES.index(gate)
     # The conversation carries the delay now; re-check everything it could have moved.
     with file_lock(root / ".user-gates.lock", "approval"):
         for filename, expected in review["artifacts"].items():
-            if digest(Path(filename)) != expected:
+            if file_digest(Path(filename)) != expected:
                 raise GateError(f"BLOCKED: artifact changed since review: {filename}")
         if index:
             require(root, GATES[index - 1])
@@ -196,16 +240,18 @@ def commit(root: Path, gate: str, note: str) -> None:
         data[gate] = {"artifacts": review["artifacts"],
                       "confirmed_at": datetime.now(timezone.utc).isoformat(),
                       "note": note}
+        if exempted:
+            data[gate]["exempted"] = exempted
         if gate == "G3":
             data[gate]["narration"] = review["narration"]
         if gate == "G2":
             data[gate]["teaching_plans"] = review["teaching_plans"]
+        if gate == "G0" and review.get("capabilities"):
+            data[gate]["capabilities"] = review["capabilities"]
         if review["evidence"] is not None:
             data[gate].update({"evidence": review["evidence"],
                                "render_key": review["render_key"]})
         atomic_json(root / STATE_FILE, data)
-    path.unlink(missing_ok=True)
-    print(f"Recorded {gate}; downstream approvals cleared.")
 
 
 def discard(root: Path, gate: str) -> None:
@@ -254,7 +300,7 @@ def require_spec_snapshot(root: Path, spec: dict, mode: str = "standard",
         path = Path(filename)
         if path.suffix.lower() not in (".json", ".yaml", ".yml"):
             continue
-        document, digest = read_document_snapshot(path)
+        document, digest = load_document_and_hash(path)
         if document == spec:
             if digest != record["artifacts"][filename]:
                 raise GateError("BLOCKED: G3 source changed while its snapshot was read")
@@ -272,21 +318,10 @@ def require_teaching(root: Path, spec: dict) -> None:
         return
     require(root, "G2")
     record = load(root)["G2"]
-    wanted = fingerprint(design)
-    if wanted in record.get("teaching_plans", []):
+    if fingerprint(design) in record.get("teaching_plans", []):
         return
-    # Older records hashed raw JSON spelling; re-read only the exact approved material.
-    for filename, expected in record["artifacts"].items():
-        path = Path(filename)
-        if path.suffix.lower() not in (".json", ".yaml", ".yml"):
-            continue
-        document, digest = read_document_snapshot(path)
-        if digest != expected:
-            raise GateError("BLOCKED: G2 design changed while its snapshot was read")
-        approved = artifact_design(document) if isinstance(document, dict) else None
-        if approved is not None and fingerprint(approved) == wanted:
-            return
-    raise GateError("BLOCKED: G2 must confirm this teaching design before narration")
+    raise GateError("BLOCKED: G2 must confirm this teaching design; "
+                    "older records reapprove G2 under the current design identity")
 
 
 def require_render(root: Path, key: str) -> None:
@@ -313,10 +348,20 @@ def main() -> int:
     approval.add_argument("--artifact", type=Path, action="append", required=True)
     approval.add_argument("--mode", choices=["standard", "fast", "scene"], default="standard",
                           help="G3 使用的配音入口；会展示实际音色、语速及处理配置")
+    approval.add_argument("--capability", action="append", choices=CAPABILITIES,
+                          default=None, help="G0 声明选用能力并检查本地条件；可重复")
     confirm = sub.add_parser("confirm", help="Record the staged review after the user answered")
     confirm.add_argument("gate", choices=GATES)
     confirm.add_argument("--note", required=True,
                          help="用户的确认原话；写入审批记录供审计")
+    waive = sub.add_parser("exempt", help="Record a user-declared exemption for this gate")
+    waive.add_argument("gate", choices=GATES)
+    waive.add_argument("--artifact", type=Path, action="append", required=True)
+    waive.add_argument("--scope", action="append", required=True,
+                       help="豁免范围，可重复；技术检查不能豁免")
+    waive.add_argument("--note", required=True,
+                       help="用户的豁免原话；写入审批记录供审计")
+    waive.add_argument("--mode", choices=["standard", "fast", "scene"], default="standard")
     drop = sub.add_parser("discard", help="Drop a staged review the user rejected")
     drop.add_argument("gate", choices=GATES)
     check = sub.add_parser("check")
@@ -327,9 +372,12 @@ def main() -> int:
     run.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.operation == "approve":
-        print_review(stage(args.root, args.gate, args.artifact, args.mode))
+        print_review(stage_review(args.root, args.gate, args.artifact, args.mode,
+                                  args.capability))
     elif args.operation == "confirm":
-        commit(args.root, args.gate, args.note)
+        commit_review(args.root, args.gate, args.note)
+    elif args.operation == "exempt":
+        exempt(args.root, args.gate, args.artifact, args.scope, args.note, args.mode)
     elif args.operation == "discard":
         discard(args.root, args.gate)
     elif args.operation == "check":

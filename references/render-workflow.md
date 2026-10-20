@@ -92,6 +92,7 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
     "form": "structure",
     "objects": ["原因", "结果"],
     "change": "先展示原因，再连接到结果",
+    "outcome": "原因指向结果的连线完成",
     "order": ["原因", "结果"]
   }
 }
@@ -99,7 +100,7 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 
 - `role`：title、rule、example、mistake、practice、answer、summary。
 - `form`：text、structure、steps、compare、formula、chart。
-- `objects`：1–6 个不同对象；`order` 恰好排列这些对象；`change` 描述变化或静态关系。
+- `objects`：1–6 个不同对象；`order` 恰好排列这些对象；`change` 描述变化或静态关系；`outcome` 说明画面最终呈现的结果。
 - 题目 practice 后紧接 answer，答案也须紧跟对应题目；不强制所有讲解都有练习。
 - 教学角色、画面形式和主题分别表达学习目的、知识关系与配色字体，不互相替代。
 - 这些字段用于设计确认和一致性校验，不是新的自动排版或绘图后端；实际画板仍须按计划制作并人工核对。
@@ -117,7 +118,7 @@ python <skill>/scripts/user_gates.py --root . confirm G2 --note "讲稿确认，
 设计输出包含原始旁白、角色、形式、对象和顺序。G3 和渲染入口会核对其是否已由 G2 确认。
 改变设计或正文后重新确认 G2；仅换音色或读法时仍由 G3 确认，不篡改画面原文。
 设计身份统一 `hold` 的整数/浮点表示和空旁白槽位；省略 region 与空文本不会凭表示差异被当作改稿。
-既有 G2 的旧指纹可通过内容未变的已批准材料重新规范化校验，不自动补签或重写审批；非空正文、视觉计划或材料内容真的变化时仍须重新确认。
+按旧表示法指纹记录的 G2 不再自动折算；旧记录须按当前统一身份重新 approve 并 confirm G2。
 
 ## 5. 停顿与帧锁
 

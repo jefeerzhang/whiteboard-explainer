@@ -5,6 +5,7 @@ import importlib
 import hashlib
 import json
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -21,7 +22,7 @@ except ImportError:
     yaml = None  # type: ignore[assignment]
 
 
-def read_document_snapshot(path: Path):
+def load_document_and_hash(path: Path):
     data = path.read_bytes()
     text = data.decode("utf-8-sig")
     if path.suffix.lower() in (".yaml", ".yml"):
@@ -33,19 +34,28 @@ def read_document_snapshot(path: Path):
     return spec, hashlib.sha256(data).hexdigest()
 
 
-def read_document(path: Path):
-    return read_document_snapshot(path)[0]
+def load_document(path: Path):
+    return load_document_and_hash(path)[0]
 
 
-def read_spec(path: Path) -> dict:
-    return read_spec_snapshot(path)[0]
+def load_spec(path: Path) -> dict:
+    return load_spec_and_hash(path)[0]
 
 
-def read_spec_snapshot(path: Path) -> tuple[dict, str]:
-    spec, digest = read_document_snapshot(path)
+def load_spec_and_hash(path: Path) -> tuple[dict, str]:
+    spec, digest = load_document_and_hash(path)
     if not isinstance(spec, dict):
         raise ValueError("The production input must be an object")
     return spec, digest
+
+
+def declared_path(root: Path, value: str, name: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a path string")
+    resolved = (root / value).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise ValueError(f"{name} must stay inside this project")
+    return resolved
 
 
 TEXT_VERSION = 2
@@ -140,8 +150,7 @@ def validate_spec(spec: dict, root: Path, mode: str, allow_empty: bool = False) 
     if not isinstance(spec.get("idea", ""), str):
         raise ValueError("idea must be a string")
     audio_dir = spec.get("audio_dir", "audio/narration")
-    if not isinstance(audio_dir, str) or not (root / audio_dir).resolve().is_relative_to(root.resolve()):
-        raise ValueError("audio_dir must stay inside this project")
+    declared_path(root, audio_dir, "audio_dir")
     ids = set()
     for scene in scenes:
         if not isinstance(scene, dict):
@@ -160,10 +169,12 @@ def validate_spec(spec: dict, root: Path, mode: str, allow_empty: bool = False) 
         if not isinstance(image, str):
             raise ValueError(f"{sid}: image path is required")
         try:
-            with Image.open(root / image) as im:
+            with Image.open(declared_path(root, image, f"{sid}: image")) as im:
                 im.verify()
         except (OSError, ValueError) as exc:
             raise ValueError(f"{sid}: image cannot be read") from exc
+        if "audio" in scene:
+            declared_path(root, scene["audio"], f"{sid}: audio")
         if "duration" in scene:
             positive(scene["duration"], f"{sid}: duration")
         regions = scene.get("regions", [])
@@ -190,13 +201,13 @@ def validate_spec(spec: dict, root: Path, mode: str, allow_empty: bool = False) 
                     raise ValueError(f"{sid}: box must have positive width and height")
     if spec.get("font"):
         try:
-            ImageFont.truetype(str(root / spec["font"]), 24)
+            ImageFont.truetype(str(declared_path(root, spec["font"], "font")), 24)
         except OSError as exc:
             raise ValueError("The requested font cannot be loaded") from exc
     teaching_plan(spec)
 
 
-def local_tools() -> dict:
+def media_tools() -> dict:
     tools = {}
     for name in ("ffmpeg", "ffprobe"):
         path = shutil.which(name)
@@ -211,11 +222,45 @@ def local_tools() -> dict:
                            text=True, errors="replace", timeout=30)
     if probe.returncode or "ffprobe" not in probe.stdout:
         raise ValueError("ffprobe is not executable")
+    return tools
+
+
+def local_tools() -> dict:
+    tools = media_tools()
     try:
         importlib.import_module("edge_tts")
     except ImportError as exc:
         raise ValueError("The selected backend requires an importable edge-tts SDK") from exc
     return tools
+
+
+CAPABILITIES = ("boards", "tts", "apiz", "render")
+
+
+def capability_check(name: str) -> str:
+    """Check the local conditions a selected capability needs.
+
+    Returns what was verified. Credential checks prove presence only:
+    values are never printed and connectivity is never claimed.
+    """
+    if name == "boards":
+        importlib.import_module("PIL")
+        return "Pillow importable"
+    if name == "tts":
+        try:
+            importlib.import_module("edge_tts")
+        except ImportError as exc:
+            raise ValueError("edge-tts SDK is not importable") from exc
+        return "edge-tts SDK importable (connectivity not verified)"
+    if name == "render":
+        media_tools()
+        return "ffmpeg/ffprobe/libx264 available"
+    if name == "apiz":
+        if not (os.environ.get("APIZ_API_KEY")
+                or (Path.home() / ".config/apiz/config.toml").is_file()):
+            raise ValueError("apiz requires APIZ_API_KEY or ~/.config/apiz/config.toml")
+        return "apiz credential present (value and connectivity not verified)"
+    raise ValueError(f"Unknown capability: {name}")
 
 
 def inspection_report(spec: dict, root, mode: str = "standard",

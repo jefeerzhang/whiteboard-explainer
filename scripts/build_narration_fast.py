@@ -16,7 +16,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from production import print_design, print_inspection, read_spec
+from production import load_spec, print_design, print_inspection
 from narration_production import produce_regions
 
 def main() -> int:
@@ -31,7 +31,7 @@ def main() -> int:
     spec_path = Path(args.spec).resolve()
     root = spec_path.parent
     if args.design_only or args.dry_run or args.preflight:
-        spec = read_spec(spec_path)
+        spec = load_spec(spec_path)
     if args.design_only:
         print_design(spec)
         return 0

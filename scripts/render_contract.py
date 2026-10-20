@@ -12,7 +12,7 @@ from PIL import Image
 from artifacts import SHARED_IMPLEMENTATION, atomic_bytes, atomic_json, file_digest, fingerprint, relative
 from media import verify
 from narration_runs import read_run
-from production import normalize_canvas, positive, read_spec, validate_spec
+from production import declared_path, load_spec, normalize_canvas, positive, validate_spec
 
 
 QUALITY = {
@@ -80,7 +80,7 @@ def snapshot(path: Path, plan: dict, config: dict) -> dict:
         native = plan["narration"]
         if not isinstance(native, dict) or not isinstance(native.get("manifest"), str):
             raise ValueError("Narration provenance requires a run manifest")
-        narration_path = (root / native["manifest"]).resolve()
+        narration_path = declared_path(root, native["manifest"], "narration manifest")
         report, files = read_run(narration_path)
         if native.get("run_id") != report["run_id"] or native.get("run_key") != report["run_key"]:
             raise ValueError("Narration provenance belongs to another run")
@@ -108,6 +108,7 @@ def snapshot(path: Path, plan: dict, config: dict) -> dict:
             active = positive(scene.get("narration_duration"), f"{sid}: narration_duration")
             if active + scene.get("hold", 0) + scene.get("tail_pad", 0) > duration + 1 / 24000 + 1e-6:
                 raise ValueError(f"{sid}: audio does not include the declared silent hold")
+        previous_end = 0.0
         for region in scene.get("regions", []):
             start, end = region.get("start"), region.get("end")
             if (start is None) != (end is None):
@@ -118,6 +119,9 @@ def snapshot(path: Path, plan: dict, config: dict) -> dict:
                         or not math.isfinite(start) or not math.isfinite(end)
                         or not 0 <= start < end <= duration + 0.001):
                     raise CueError(f"{sid}: cue must stay inside the scene duration")
+                if start < previous_end - 0.001:
+                    raise CueError(f"{sid}: cue windows must follow region order without overlap")
+                previous_end = end
         mode = ("exact" if any(r.get("start") is not None for r in scene.get("regions", []))
                 else "estimated" if scene.get("regions") else "uniform")
         scenes.append({"id": sid, "duration": frame_duration(duration, config["fps"], scene),
@@ -223,7 +227,7 @@ def _artifact(role: str, path: Path, base: Path) -> dict:
 
 
 def validate_evidence(path: Path, stage: str) -> tuple[dict, set[Path]]:
-    proof = read_spec(path)
+    proof = load_spec(path)
     _receipt_contract(proof, stage, path.parent)
     context = proof["context"]
     check_snapshot(context)

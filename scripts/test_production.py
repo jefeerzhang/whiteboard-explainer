@@ -9,7 +9,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import wave
 import hashlib
 import asyncio
 import copy
@@ -20,15 +19,14 @@ from unittest.mock import patch
 from PIL import Image
 
 
-SCRIPTS = Path(__file__).resolve().parent
+import testkit
+
+SCRIPTS = testkit.SCRIPTS
 
 
 class ProductionTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        Image.new("RGB", (64, 36), "white").save(self.root / "board.png")
+        self.root = testkit.temp_project(self)
         self.spec = {
             "voice": "zh-CN-XiaoyiNeural",
             "rate": "+15%",
@@ -43,11 +41,7 @@ class ProductionTests(unittest.TestCase):
     def save(self):
         self.path.write_text(json.dumps(self.spec), encoding="utf-8")
 
-    def cli(self, script, *args, input_text=None):
-        return subprocess.run(
-            [sys.executable, str(SCRIPTS / script), *map(str, args)],
-            capture_output=True, text=True, encoding="utf-8", input=input_text,
-        )
+    cli = staticmethod(testkit.cli)
 
     def test_dry_run_reports_effective_config_without_production_outputs(self):
         result = self.cli("build_narration.py", self.path, "--dry-run")
@@ -68,6 +62,25 @@ class ProductionTests(unittest.TestCase):
         self.assertIn("s01", result.stderr)
         self.assertIn("box", result.stderr)
         self.assertFalse((self.root / "audio").exists())
+
+    def test_asset_paths_outside_the_project_are_rejected(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        Image.new("RGB", (4, 4), "white").save(Path(outside.name) / "outside.png")
+        for value in ("../" + Path(outside.name).name + "/outside.png",
+                      str((Path(outside.name) / "outside.png").resolve())):
+            with self.subTest(value=value):
+                self.spec["scenes"][0]["image"] = value
+                self.save()
+                result = self.cli("build_narration.py", self.path, "--dry-run")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("inside", result.stderr)
+        self.spec["scenes"][0]["image"] = "board.png"
+        self.spec["font"] = str((Path(outside.name) / "outside.png").resolve())
+        self.save()
+        result = self.cli("build_narration.py", self.path, "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("inside", result.stderr)
 
     def test_fast_and_scene_clis_share_inspection_and_validate_fonts(self):
         result = self.cli("build_narration_fast.py", self.path, "--dry-run")
@@ -121,20 +134,7 @@ class ProductionTests(unittest.TestCase):
         self.assertIn(result, (None, 0))
         return output.getvalue()
 
-    def fake_tts(self, requests):
-        def communicate(text, voice, rate):
-            requests.append((text, voice, rate))
-
-            class Request:
-                async def save(self, filename):
-                    with wave.open(str(filename), "wb") as stream:
-                        stream.setnchannels(1)
-                        stream.setsampwidth(2)
-                        stream.setframerate(24000)
-                        stream.writeframes(b"\xe8\x03" * 6000)
-
-            return Request()
-        return communicate
+    fake_tts = staticmethod(testkit.fake_tts)
 
     def test_changed_spoken_text_regenerates_only_the_affected_audio(self):
         self.spec["scenes"][0]["regions"].append({
@@ -388,14 +388,62 @@ class ProductionTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_documented_inspection_contract_matches_cli(self):
-        document = (SCRIPTS.parent / "references/narration-workflow.md").read_text(encoding="utf-8")
-        self.assertIn("NOTRUN", document)
-        self.assertIn("--mode fast", document)
-        self.assertIn("原始合成与裁静音/格式转换分开", document)
-        result = self.cli("build_narration.py", self.path, "--dry-run")
-        self.assertEqual(json.loads(result.stdout)["runtime"], "NOTRUN")
+    def test_documented_contract_covers_each_promise_in_behavior(self):
+        narration = (SCRIPTS.parent / "references/narration-workflow.md").read_text(encoding="utf-8")
+        gates = (SCRIPTS.parent / "references/user-gates.md").read_text(encoding="utf-8")
+
+        # 1. 用户确认顺序：approve 冻结、confirm 记录；未暂存直接 confirm 被拒
+        self.assertIn("approve", gates)
+        self.assertIn("confirm", gates)
+        result = self.cli("user_gates.py", "--root", self.root, "confirm", "G0",
+                          "--note", "未先 review")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no staged review", result.stderr)
+
+        # 5. 预览复用条件：preview 需要 G2，未授权被拒且不产生缓存
+        self.assertIn("--preview", narration)
+        scenes = self.spec["scenes"]
+        self.spec["scenes"] = [{"id": "s01", "text": "preview text"}]
+        self.save()
+        result = self.cli("gen_tts.py", self.path, "--preview",
+                          "--out-dir", str(self.root / "preview"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "preview").exists())
         self.assertFalse((self.root / ".narration-cache").exists())
+        self.spec["scenes"] = scenes
+        self.save()
+
+        # 2. 缓存失效维度：实际文本、音色、语速与契约版本参与缓存身份
+        for term in ("实际文本", "音色", "语速", "契约版本"):
+            self.assertIn(term, narration)
+        self.assertIn("原始合成与裁静音/格式转换分开", narration)
+        self.approve()
+        requests = []
+        with patch("edge_tts.Communicate", side_effect=self.fake_tts(requests)):
+            self.run_narration()
+            first = json.loads((self.root / "plan.json").read_text())
+            self.spec["rate"] = "+16%"
+            self.save()
+            self.approve()
+            self.run_narration()
+            second = json.loads((self.root / "plan.json").read_text())
+        self.assertNotEqual(first["scenes"][0]["audio"], second["scenes"][0]["audio"])
+
+        # 3. 运行清单缺失处理：缺失清单不凭目录名或空文件复用
+        self.assertIn("schema 2", narration)
+        result = self.cli(
+            "verify_media.py", "--manifest", str(self.root / "missing.json"))
+        self.assertNotEqual(result.returncode, 0)
+
+        # 4. 参数约束：rate 必须为带符号百分比
+        self.assertIn("rate", narration)
+        self.spec["rate"] = "fast"
+        self.save()
+        result = self.cli("build_narration.py", self.path, "--dry-run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rate", result.stderr)
+        self.spec["rate"] = "+15%"
+        self.save()
 
     def test_shared_batch_entry_points_require_approval_before_outputs(self):
         import narration_production

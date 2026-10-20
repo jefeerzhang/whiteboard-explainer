@@ -20,8 +20,8 @@ class GateTests(unittest.TestCase):
         self.artifact.write_text("reviewed", encoding="utf-8")
 
     def record(self, gate, artifacts=None, note="用户确认"):
-        gates.stage(self.root, gate, artifacts or [self.artifact])
-        gates.commit(self.root, gate, note)
+        gates.stage_review(self.root, gate, artifacts or [self.artifact])
+        gates.commit_review(self.root, gate, note)
 
     def approve_through(self, last):
         for gate in gates.GATES[:gates.GATES.index(last) + 1]:
@@ -36,14 +36,14 @@ class GateTests(unittest.TestCase):
 
     def test_staging_records_nothing_and_commit_needs_the_staged_review(self):
         with self.assertRaises(gates.GateError):
-            gates.stage(self.root, "G3", [self.artifact])
-        gates.stage(self.root, "G0", [self.artifact])
+            gates.stage_review(self.root, "G3", [self.artifact])
+        gates.stage_review(self.root, "G0", [self.artifact])
         self.assertFalse((self.root / gates.STATE_FILE).exists())
         with self.assertRaises(gates.GateError):
-            gates.commit(self.root, "G0", "   ")
+            gates.commit_review(self.root, "G0", "   ")
         with self.assertRaises(gates.GateError):
-            gates.commit(self.root, "G1", "用户确认")
-        gates.commit(self.root, "G0", "用户确认 G0")
+            gates.commit_review(self.root, "G1", "用户确认")
+        gates.commit_review(self.root, "G0", "用户确认 G0")
         self.assertIn("G0", gates.load(self.root))
 
     def test_review_and_commit_never_prompt_the_terminal(self):
@@ -64,27 +64,71 @@ class GateTests(unittest.TestCase):
         self.assertFalse((self.root / gates.PENDING_FILE).exists())
 
     def test_artifact_changed_between_review_and_commit_blocks(self):
-        gates.stage(self.root, "G0", [self.artifact])
+        gates.stage_review(self.root, "G0", [self.artifact])
         self.artifact.write_text("changed after the user read it", encoding="utf-8")
         with self.assertRaises(gates.GateError):
-            gates.commit(self.root, "G0", "用户确认")
+            gates.commit_review(self.root, "G0", "用户确认")
         self.assertNotIn("G0", gates.load(self.root))
 
+    def test_g0_capability_preflight_binds_declared_capabilities(self):
+        review = gates.stage_review(self.root, "G0", [self.artifact],
+                             capabilities=["boards", "render"])
+        self.assertIn("Pillow", review["capabilities"]["boards"])
+        self.assertIn("ffmpeg", review["capabilities"]["render"])
+        gates.commit_review(self.root, "G0", "用户确认 G0")
+        record = gates.load(self.root)["G0"]
+        self.assertEqual(record["capabilities"], review["capabilities"])
+
+    def test_g0_capability_preflight_refuses_missing_credentials(self):
+        import os
+        empty = self.root / "nohome"
+        empty.mkdir()
+        with patch.dict(os.environ, {"APIZ_API_KEY": "",
+                                     "USERPROFILE": str(empty), "HOME": str(empty)}):
+            with self.assertRaises(gates.GateError):
+                gates.stage_review(self.root, "G0", [self.artifact], capabilities=["apiz"])
+        with self.assertRaises(gates.GateError):
+            gates.stage_review(self.root, "G1", [self.artifact], capabilities=["boards"])
+
+    def test_exemption_binds_artifacts_and_lists_the_waived_scope(self):
+        gates.exempt(self.root, "G0", [self.artifact],
+                     ["任务书无需逐字观看"], "用户说跳过任务书确认")
+        record = gates.load(self.root)["G0"]
+        self.assertEqual(record["exempted"], ["任务书无需逐字观看"])
+        self.assertIn(str(self.artifact.resolve()), record["artifacts"])
+        self.assertFalse((self.root / gates.PENDING_FILE).exists())
+        gates.require(self.root, "G0")
+        with self.assertRaises(gates.GateError):
+            gates.exempt(self.root, "G1", [self.artifact], [], "无范围")
+        with self.assertRaises(gates.GateError):
+            gates.exempt(self.root, "G1", [self.artifact], ["x"], "  ")
+
+    def test_concurrent_staging_is_refused_not_silently_overwritten(self):
+        from artifacts import file_lock
+        command = [sys.executable, str(Path(gates.__file__).resolve()),
+                   "--root", str(self.root)]
+        with file_lock(self.root / ".user-gates.lock", "approval"):
+            result = subprocess.run(
+                command + ["approve", "G0", "--artifact", str(self.artifact)],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("producer", result.stderr + result.stdout)
+
     def test_discard_removes_the_staged_review(self):
-        gates.stage(self.root, "G0", [self.artifact])
+        gates.stage_review(self.root, "G0", [self.artifact])
         gates.discard(self.root, "G0")
         with self.assertRaises(gates.GateError):
-            gates.commit(self.root, "G0", "用户确认")
+            gates.commit_review(self.root, "G0", "用户确认")
         self.assertNotIn("G0", gates.load(self.root))
 
     def test_parent_changed_while_confirmation_waited_cannot_be_overwritten(self):
         self.approve_through("G2")
-        gates.stage(self.root, "G3", [self.artifact])
+        gates.stage_review(self.root, "G3", [self.artifact])
         revised = self.root / "revised.md"
         revised.write_text("a different approved script")
         self.record("G2", [revised])
         with self.assertRaises(gates.GateError):
-            gates.commit(self.root, "G3", "用户确认")
+            gates.commit_review(self.root, "G3", "用户确认")
         self.assertNotIn("G3", gates.load(self.root))
 
     def test_design_changed_after_parsing_cannot_be_approved_with_old_metadata(self):
@@ -93,7 +137,8 @@ class GateTests(unittest.TestCase):
         report = {"teaching_plan": [{
             "id": "s01", "role": "rule", "hold": 0, "narration": ["original"],
             "visual": {"form": "text", "objects": ["rule"],
-                       "change": "show the rule", "order": ["rule"]},
+                       "change": "show the rule", "outcome": "the rule is visible",
+                       "order": ["rule"]},
         }]}
         material.write_text(json.dumps(report))
         original_read = Path.read_bytes
@@ -108,9 +153,9 @@ class GateTests(unittest.TestCase):
             return data
 
         with patch.object(Path, "read_bytes", read_then_edit):
-            gates.stage(self.root, "G2", [material])
+            gates.stage_review(self.root, "G2", [material])
         with self.assertRaises(gates.GateError):
-            gates.commit(self.root, "G2", "用户确认")
+            gates.commit_review(self.root, "G2", "用户确认")
         self.assertEqual(changed, [True])
         self.assertNotIn("G2", gates.load(self.root))
 

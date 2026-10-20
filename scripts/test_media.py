@@ -4,8 +4,9 @@ import json
 import sys
 import tempfile
 import unittest
-import wave
 from pathlib import Path
+
+import testkit
 
 
 class MediaTests(unittest.TestCase):
@@ -14,11 +15,7 @@ class MediaTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.audio = self.root / "sample.wav"
-        with wave.open(str(self.audio), "wb") as stream:
-            stream.setnchannels(1)
-            stream.setsampwidth(2)
-            stream.setframerate(16000)
-            stream.writeframes(b"\0\0" * 3200)
+        testkit.write_wav(self.audio, 3200, rate=16000, tone_frames=0)
 
     def cli(self, *args):
         return subprocess.run(

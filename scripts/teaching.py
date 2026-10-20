@@ -21,8 +21,9 @@ def validate_design(rows: list) -> list:
             raise ValueError("Teaching scene ids must be unique")
         ids.add(sid)
         visual = row.get("visual")
-        if not isinstance(visual, dict) or set(visual) != {"form", "objects", "change", "order"}:
-            raise ValueError(f"{sid}: visual requires form, objects, change and order")
+        if (not isinstance(visual, dict)
+                or set(visual) != {"form", "objects", "change", "outcome", "order"}):
+            raise ValueError(f"{sid}: visual requires form, objects, change, outcome and order")
         if not isinstance(visual["form"], str) or visual["form"] not in FORMS:
             raise ValueError(f"{sid}: unknown visual form")
         objects, order = visual["objects"], visual["order"]
@@ -35,6 +36,8 @@ def validate_design(rows: list) -> list:
             raise ValueError(f"{sid}: visual.order must order every object exactly once")
         if not isinstance(visual["change"], str) or not visual["change"].strip():
             raise ValueError(f"{sid}: describe the visual change or static relationship")
+        if not isinstance(visual["outcome"], str) or not visual["outcome"].strip():
+            raise ValueError(f"{sid}: state the outcome the visual produces")
         if not isinstance(row.get("narration"), list) or any(
                 not isinstance(text, str) for text in row["narration"]):
             raise ValueError(f"{sid}: teaching narration must be text")

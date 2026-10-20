@@ -2,7 +2,7 @@
 
 > 目的：禁止 Agent「一路干到底」。内容、风格、音色必须先让用户选，再进入绘图 / TTS / 渲染。
 > 适用范围：本 skill 全部成片任务（单集、系列、文章转视频、深度科普）。
-> 用户明确豁免时，只免除对应人工选择或观看；记录豁免范围并交互录入，不绕过必要技术检查和审批记录。
+> 用户明确豁免时，只免除对应人工选择或观看；用 `exempt <闸号> --artifact <文件> --scope <豁免范围> --note "<用户原话>"` 交互录入，豁免范围可重复列出；审批绑定与技术检查（G4/G5 回执、媒体完整性）不能豁免。
 
 ## 总规则
 
@@ -21,10 +21,11 @@
 1. `approve` 冻结并打印待确认内容，**不写** `.user-gates.json`。Agent 把打印结果原样贴进对话，请用户确认。
 2. 用户在对话中回答后，Agent 跑 `confirm`，把用户原话用 `--note` 逐字传入。脚本据此写入 `.user-gates.json`。
 
-用户拒绝或改口时，用 `discard <闸号>` 丢弃暂存内容，不要 `confirm`。待确认文件在确认或丢弃前一直留在 `.user-gates.pending.json`；其间任何文件变化都会让 `confirm` 失败，必须重跑 `approve`。
+用户拒绝或改口时，用 `discard <闸号>` 丢弃暂存内容，不要 `confirm`。待确认文件在确认或丢弃前一直留在 `.user-gates.pending.json`；其间任何文件变化都会让 `confirm` 失败，必须重跑 `approve`。暂存与确认共用审批锁；另一个生产者在暂存或确认期间持锁时，`approve` 直接失败而不是覆盖暂存内容。
 
 ```bash
-python <skill>/scripts/user_gates.py --root . approve G0 --artifact task.md
+# G0 可声明选用能力并检查本地条件（只查存在性，不试连、不打印密钥值）：
+python <skill>/scripts/user_gates.py --root . approve G0 --artifact task.md --capability boards --capability render
 python <skill>/scripts/user_gates.py --root . confirm G0 --note "用户原话"
 python <skill>/scripts/user_gates.py --root . approve G1 --artifact style.md
 python <skill>/scripts/user_gates.py --root . confirm G1 --note "用户原话"
@@ -51,7 +52,7 @@ python <skill>/scripts/user_gates.py --root . check G5 --artifact out/video.mp4
 - G3 的 `--mode standard`、`--mode fast`、`--mode scene` 分别对应普通版、快速版和场景配音。旧 G3 没有有效配置快照时须重新确认。预检、缓存与配音清单操作见 [narration-workflow.md](narration-workflow.md)。
 - 审批 JSON 含场景 `image` / `audio` 时，同时记录引用文件的哈希。后续改变画板或音频也会使确认失效。
 - 支持 `--dry-run` 的入口在该模式下不要求确认。G3 前的单句探测用 `gen_tts.py preview.yaml --preview --out-dir <试听目录>`；YAML 只能有一条非空、至多 100 字的文本，且需已过 G2。用户须先在对话中单独授权这句试听，`--preview` 不弹窗，只把授权写入 `.user-gates.json` 的 `preview` 节留审计；该授权不通过 G3。YAML 解析依赖 `requirements.txt` 中的 PyYAML。
-- 自定义 `build_voice.py`、外部 apiz 和其他制作程序必须用 `user_gates.py run tts -- <命令>` 包裹；自定义交付命令用 `run deliver`。只有受保护入口和该包装器执行拦截，直接调用外部工具不受控制。
+- 自定义 `build_voice.py`、外部 apiz 和其他制作程序必须用 `user_gates.py run tts -- <命令>` 包裹；自定义单拍渲染用 `run sample`（要求 G3），自定义全量渲染用 `run render`（要求 G4），自定义交付命令用 `run deliver`（要求 G5）。只有受保护入口和该包装器执行拦截，直接调用外部工具不受控制。
 - G4/G5 强制验证样片/全量回执类型、方案、产物和必要检查。教学设计、视频缓存和回执迁移见 [render-workflow.md](render-workflow.md)。
 - 这不是安全沙箱。能改脚本或审批文件的人仍能绕过；哈希不能证明用户实际观看，也不能自动核对教学语义。写稿与人工观看仍须遵守协议。
 

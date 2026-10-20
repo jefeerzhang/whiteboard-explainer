@@ -19,8 +19,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-from narration_production import concat, make_gap, probe_duration, produce_regions, run, tts
-from production import print_design, print_inspection, read_spec
+from narration_production import produce_regions
+from production import load_spec, print_design, print_inspection
 
 
 async def build(spec: dict, root: Path, dry: bool, mode: str = "standard",
@@ -40,7 +40,7 @@ def main() -> int:
     spec_path = Path(args.spec).resolve()
     root = spec_path.parent
     if args.design_only or args.dry_run or args.preflight:
-        spec = read_spec(spec_path)
+        spec = load_spec(spec_path)
     if args.design_only:
         print_design(spec)
         return 0

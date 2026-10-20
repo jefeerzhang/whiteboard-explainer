@@ -7,9 +7,7 @@ import io
 import json
 import subprocess
 import sys
-import tempfile
 import unittest
-import wave
 import copy
 import os
 import shutil
@@ -18,15 +16,13 @@ from unittest.mock import patch
 
 from PIL import Image, ImageDraw
 
+import testkit
 from artifacts import file_digest, fingerprint
 
 
 class VideoTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        Image.new("RGB", (64, 36), "white").save(self.root / "board.png")
+        self.root = testkit.temp_project(self)
         self.plan = {"scenes": [{
             "id": "s01", "image": "board.png", "duration": 0.5, "regions": [],
         }]}
@@ -44,8 +40,8 @@ class VideoTests(unittest.TestCase):
     def approve(self, gate, artifact):
         import user_gates
         with contextlib.redirect_stdout(io.StringIO()):
-            user_gates.stage(self.root, gate, [artifact])
-            user_gates.commit(self.root, gate, f"用户确认 {gate}")
+            user_gates.stage_review(self.root, gate, [artifact])
+            user_gates.commit_review(self.root, gate, f"用户确认 {gate}")
 
     def fake_engine(self, fade_duration=0.1):
         calls = self.calls
@@ -160,14 +156,10 @@ class VideoTests(unittest.TestCase):
         Image.new("RGB", (64, 36), "red").save(self.root / "board.png")
         Image.new("RGB", (64, 36), "blue").save(self.root / "answer.png")
         self.plan.update({"teaching": True, "fps": 20})
-        visual = {"form": "text", "objects": ["question"],
+        visual = {"form": "text", "objects": ["question"], "outcome": "question stays visible",
                   "change": "show the question", "order": ["question"]}
         for filename, samples in (("question.wav", 126000), ("answer.wav", 6000)):
-            with wave.open(str(self.root / filename), "wb") as audio:
-                audio.setnchannels(1)
-                audio.setsampwidth(2)
-                audio.setframerate(24000)
-                audio.writeframes(b"\xe8\x03" * 5520 + b"\0\0" * (samples - 5520))
+            testkit.write_wav(self.root / filename, samples, tone_frames=5520)
         question = self.plan["scenes"][0]
         question.update({"audio": "question.wav", "narration_duration": 0.23,
                          "role": "practice", "hold": 5, "visual": visual})
@@ -199,17 +191,13 @@ class VideoTests(unittest.TestCase):
 
     def test_hold_at_29_fps_preserves_the_exact_frame_count(self):
         self.plan.update({"teaching": True, "fps": 29})
-        visual = {"form": "text", "objects": ["question"],
+        visual = {"form": "text", "objects": ["question"], "outcome": "question stays visible",
                   "change": "keep the question visible", "order": ["question"]}
         scenes = []
         for sid, samples, frames, role, hold in (
                 ("s01", 125794, 152, "practice", 5), ("s02", 5794, 7, "answer", 0)):
             audio = self.root / f"{sid}.wav"
-            with wave.open(str(audio), "wb") as stream:
-                stream.setnchannels(1)
-                stream.setsampwidth(2)
-                stream.setframerate(24000)
-                stream.writeframes(b"\xe8\x03" * 5520 + b"\0\0" * (samples - 5520))
+            testkit.write_wav(audio, samples, tone_frames=5520)
             scenes.append({
                 "id": sid, "image": "board.png", "audio": audio.name, "regions": [],
                 "role": role, "visual": visual, "hold": hold,
@@ -257,6 +245,24 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(report["checks"]["media"], "NOTRUN")
         self.assertEqual(report["checks"]["cue"], "FAIL")
 
+    def test_overlapping_or_regressing_cue_windows_fail_the_cue_check(self):
+        for regions in (
+            [{"label": "first", "box": [0, 0, 100, 100], "start": 0.3, "end": 0.45},
+             {"label": "second", "box": [0, 0, 100, 100], "start": 0, "end": 0.2}],
+            [{"label": "first", "box": [0, 0, 100, 100], "start": 0, "end": 0.4},
+             {"label": "second", "box": [0, 0, 100, 100], "start": 0.2, "end": 0.5}],
+        ):
+            with self.subTest(regions=regions):
+                self.plan["scenes"][0]["regions"] = regions
+                self.save()
+                code, output = self.invoke("--only", "s01")
+                report = self.report(output)
+                self.assertNotEqual(code, 0)
+                self.assertEqual(self.calls, [])
+                self.assertEqual(report["checks"]["cue"], "FAIL")
+                self.assertEqual(report["checks"]["media"], "NOTRUN")
+                self.calls.clear()
+
     def test_modified_sample_frame_cannot_be_approved(self):
         import user_gates
         sample = self.report(self.render("--only", "s01"))
@@ -271,7 +277,7 @@ class VideoTests(unittest.TestCase):
         import user_gates
         state = user_gates.load(self.root)
         note = self.root / "review.md"
-        state["G4"] = {"artifacts": {str(note): user_gates.digest(note)}}
+        state["G4"] = {"artifacts": {str(note): file_digest(note)}}
         (self.root / ".user-gates.json").write_text(json.dumps(state))
         code, output = self.invoke()
         self.assertNotEqual(code, 0)
@@ -527,11 +533,7 @@ class VideoTests(unittest.TestCase):
 
         class Request:
             async def save(self, filename):
-                with wave.open(str(filename), "wb") as audio:
-                    audio.setnchannels(1)
-                    audio.setsampwidth(2)
-                    audio.setframerate(24000)
-                    audio.writeframes(b"\xe8\x03" * 6000)
+                testkit.write_wav(Path(filename), 6000)
 
         with patch("edge_tts.Communicate", return_value=Request()), \
                 patch.object(sys, "argv", ["build_narration", str(source)]), \
@@ -551,7 +553,8 @@ class VideoTests(unittest.TestCase):
         scene = {
             "id": "s01", "image": "board.png", "duration": 0.25, "role": "rule",
             "visual": {"form": "text", "objects": ["rule"],
-                       "change": "show the rule", "order": ["rule"]},
+                       "change": "show the rule", "outcome": "the rule is visible",
+                       "order": ["rule"]},
         }
         if silent:
             # Isolate the omitted-regions/empty-narration case from numeric hold coercion.
@@ -584,15 +587,16 @@ class VideoTests(unittest.TestCase):
 
         class Request:
             async def save(self, filename):
-                with wave.open(str(filename), "wb") as audio:
-                    audio.setnchannels(1)
-                    audio.setsampwidth(2)
-                    audio.setframerate(24000)
-                    audio.writeframes(b"\xe8\x03" * 6000)
+                testkit.write_wav(Path(filename), 6000)
 
         with patch("edge_tts.Communicate", return_value=Request()), \
                 patch.object(sys, "argv", ["build_narration", str(source)]), \
                 contextlib.redirect_stdout(io.StringIO()):
+            if legacy:
+                import user_gates
+                with self.assertRaises(user_gates.GateError) as raised:
+                    importlib.import_module("build_narration").main()
+                return 1, str(raised.exception)
             self.assertEqual(importlib.import_module("build_narration").main(), 0)
         return self.invoke("--only", "s01")
 
@@ -606,13 +610,17 @@ class VideoTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(self.report(output)["status"], "PASS")
 
-    def test_legacy_g2_numeric_spelling_keeps_its_reviewed_design(self):
+    def test_legacy_g2_numeric_spelling_requires_reconfirmation(self):
         code, output = self.teaching_narration_sample(legacy=True)
-        self.assertEqual(code, 0, output)
+        self.assertNotEqual(code, 0)
+        self.assertIn("G2", output)
+        self.assertEqual(self.calls, [])
 
-    def test_legacy_g2_empty_narration_keeps_its_reviewed_design(self):
+    def test_legacy_g2_empty_narration_requires_reconfirmation(self):
         code, output = self.teaching_narration_sample(silent=True, legacy=True)
-        self.assertEqual(code, 0, output)
+        self.assertNotEqual(code, 0)
+        self.assertIn("G2", output)
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":

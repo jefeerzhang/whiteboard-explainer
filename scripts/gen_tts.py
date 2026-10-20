@@ -18,11 +18,11 @@ import json
 from pathlib import Path
 
 from narration_production import preview_sentence, produce_scenes
-from production import print_design, print_inspection, read_spec
+from production import load_spec, print_design, print_inspection
 
 
 def load_narration(path: Path) -> dict:
-    return read_spec(path)
+    return load_spec(path)
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
 
     source = Path(args.narration_yaml).resolve()
     if args.design_only or args.dry_run or args.preflight:
-        spec = read_spec(source)
+        spec = load_spec(source)
         if args.design_only:
             print_design(spec)
         else:

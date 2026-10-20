@@ -30,6 +30,7 @@ from pathlib import Path
 from artifacts import atomic_bytes, atomic_json, file_digest, file_lock
 from boards import board_canvas, board_image
 from check_assignment import audit
+from media import concat_manifest
 from render_contract import QUALITY, RenderReceipt, frame_duration, render_config, scene_key, snapshot, verify_video
 from user_gates import GateError, require, require_render, require_teaching, require_narration
 
@@ -351,12 +352,8 @@ def concatenate(parts: list[Path], output: Path) -> None:
         if parts[0].resolve() != output.resolve():
             run(["ffmpeg", "-y", "-i", str(parts[0]), "-c", "copy", str(output)])
         return
-    concat_list = output.parent / (output.name + ".concat.txt")
+    concat_list = concat_manifest(parts, output)
     try:
-        concat_list.write_text(
-            "".join("file '" + p.resolve().as_posix().replace("'", "'\\''") + "'\n" for p in parts),
-            encoding="utf-8",
-        )
         run(["ffmpeg", "-y", "-f", "concat", "-safe", "0",
              "-i", str(concat_list), "-c", "copy", str(output)])
     finally:
